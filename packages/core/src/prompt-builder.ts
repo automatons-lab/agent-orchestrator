@@ -117,7 +117,7 @@ function buildConfigLayer(config: PromptBuildConfig): string {
 
   if (issueId) {
     lines.push(`\n## Task`);
-    lines.push(`Work on issue: ${issueId}`);
+    lines.push(`Work on issue #${issueId}`);
     lines.push(
       `Create a branch named so that it auto-links to the issue tracker (e.g. feat/${issueId}).`,
     );
@@ -203,7 +203,7 @@ export function buildPrompt(
     taskPrompt: config.userPrompt
       ? config.userPrompt
       : config.issueId
-        ? `Work on issue: ${config.issueId}`
+        ? `Work on issue #${config.issueId}. The issue title, description, and labels are already in your system prompt — start implementing without re-fetching the issue. Fetch comments or linked issues only if you need additional context.`
         : undefined,
   };
 }
