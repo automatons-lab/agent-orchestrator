@@ -237,6 +237,26 @@ export function extractConfiguredReposFromYaml(rawYaml: string): string[] {
   // Detected at runtime from the first project entry line — not hardcoded.
   let projectKeyIndent: number | null = null;
 
+  // State for parsing the rich object form:
+  //   repo:
+  //     owner: foo
+  //     name:  bar
+  // We track when we're inside a `repo:` block at a known indent, then emit
+  // `owner/name` once we leave the block.
+  let inRepoBlock = false;
+  let repoBlockIndent = -1;
+  let pendingOwner: string | null = null;
+  let pendingName: string | null = null;
+  const flushRepoBlock = (): void => {
+    if (pendingOwner && pendingName) {
+      repos.add(`${pendingOwner}/${pendingName}`);
+    }
+    inRepoBlock = false;
+    repoBlockIndent = -1;
+    pendingOwner = null;
+    pendingName = null;
+  };
+
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -250,8 +270,11 @@ export function extractConfiguredReposFromYaml(rawYaml: string): string[] {
       continue;
     }
 
-    // Any top-level key after projects: ends the block.
-    if (indent === 0) break;
+    // Any top-level key after projects: ends the block (and any open repo block).
+    if (indent === 0) {
+      flushRepoBlock();
+      break;
+    }
 
     // Detect the indentation level of project name keys from the first entry.
     // Strip inline comments before checking — `my-app: # comment` is a valid key.
@@ -260,17 +283,54 @@ export function extractConfiguredReposFromYaml(rawYaml: string): string[] {
       continue;
     }
 
-    // Lines at the project-key indent are project names — skip them.
-    if (indent === projectKeyIndent) continue;
+    // Lines at the project-key indent are project names — skip them, and
+    // close any in-flight repo block from the previous project.
+    if (indent === projectKeyIndent) {
+      flushRepoBlock();
+      continue;
+    }
+
+    // We may still be parsing a `repo:` rich-form block from the previous
+    // line. Children of that block are at indent > repoBlockIndent.
+    if (inRepoBlock) {
+      if (indent > repoBlockIndent) {
+        const ownerMatch = trimmed.match(/^owner:\s*(.+)$/);
+        if (ownerMatch) {
+          pendingOwner = normalizeYamlScalar(ownerMatch[1]) || null;
+          continue;
+        }
+        const nameMatch = trimmed.match(/^name:\s*(.+)$/);
+        if (nameMatch) {
+          pendingName = normalizeYamlScalar(nameMatch[1]) || null;
+          continue;
+        }
+        // platform / originUrl / other keys — ignore inside the block.
+        continue;
+      }
+      // Outdented — the block is finished, fall through to normal parsing.
+      flushRepoBlock();
+    }
 
     // Lines indented deeper than the project key are project properties.
     if (indent > projectKeyIndent) {
-      const match = trimmed.match(/^repo:\s*(.+)$/);
-      if (!match) continue;
-      const repo = normalizeYamlScalar(match[1]);
-      if (repo) repos.add(repo);
+      // Flat form: `repo: owner/name`
+      const flatMatch = trimmed.match(/^repo:\s*(\S.*)$/);
+      if (flatMatch) {
+        const repo = normalizeYamlScalar(flatMatch[1]);
+        if (repo) repos.add(repo);
+        continue;
+      }
+      // Rich form: bare `repo:` opens a child object block on the next line.
+      if (trimmed === "repo:") {
+        inRepoBlock = true;
+        repoBlockIndent = indent;
+        pendingOwner = null;
+        pendingName = null;
+        continue;
+      }
     }
   }
+  flushRepoBlock();
 
   return [...repos];
 }
