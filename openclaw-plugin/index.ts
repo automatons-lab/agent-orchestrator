@@ -936,7 +936,7 @@ export default function (api: PluginApi) {
         issue: {
           type: "string",
           description:
-            "Issue identifier (e.g. #42). Optional — omit for freeform tasks, then use ao_send to describe the work.",
+            "Issue identifier. Multi-project setups: use `<projectId>/<n>` format (e.g. `feed-gathering/36`) where projectId or sessionPrefix matches a registered AO project. Single-project setups accept bare `#42`. Omit for freeform tasks, then use ao_send to describe the work.",
         },
         agent: { type: "string", description: "Override agent plugin (e.g. codex, claude-code)" },
         claimPr: {
