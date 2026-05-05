@@ -203,9 +203,26 @@ export type GlobalConfig = z.infer<typeof GlobalConfigSchema>;
  * defaultBranch, source, registeredAt, displayName, sessionPrefix.
  * Those are owned by the global registry.
  */
+// Mirror config.ts's flexible repo shape so local-yaml loaders accept both
+// the flat string and dashboard's rich object form, normalizing to a string.
+const LocalRepoSchema = z
+  .union([
+    z.string(),
+    z
+      .object({
+        owner: z.string(),
+        name: z.string(),
+        platform: z.string().optional(),
+        originUrl: z.string().optional(),
+      })
+      .passthrough()
+      .transform((v) => `${v.owner}/${v.name}`),
+  ])
+  .optional();
+
 export const LocalProjectConfigSchema = z
   .object({
-    repo: z.string().optional(),
+    repo: LocalRepoSchema,
     defaultBranch: z.string().optional(),
     runtime: z.string().optional(),
     agent: z.string().optional(),

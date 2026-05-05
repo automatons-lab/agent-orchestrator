@@ -235,9 +235,29 @@ const RoleAgentConfigSchema = z
   })
   .optional();
 
+// Accept either flat string form (`owner/repo`) or the rich object form
+// `{ owner, name, platform?, originUrl? }` that the dashboard auto-writes,
+// and normalize both to a plain string. Keeps strict validation but no
+// longer crashes status / loadConfig() when something — dashboard, manual
+// edit, migration — leaves the rich shape on disk.
+const RepoSchema = z
+  .union([
+    z.string(),
+    z
+      .object({
+        owner: z.string(),
+        name: z.string(),
+        platform: z.string().optional(),
+        originUrl: z.string().optional(),
+      })
+      .passthrough()
+      .transform((v) => `${v.owner}/${v.name}`),
+  ])
+  .optional();
+
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
-  repo: z.string().optional(),
+  repo: RepoSchema,
   path: z.string(),
   defaultBranch: z.string().default("main"),
   sessionPrefix: z
