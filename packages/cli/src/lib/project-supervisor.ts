@@ -16,6 +16,10 @@ import {
 import { addProjectToRunning, removeProjectFromRunning } from "./running-state.js";
 
 const DEFAULT_SUPERVISOR_INTERVAL_MS = 60_000;
+const DEBUG = process.env.AO_DEBUG_SUPERVISOR === "1";
+function debug(...args: unknown[]): void {
+  if (DEBUG) console.log("[supervisor]", ...args);
+}
 
 interface SupervisorHandle {
   stop: () => void;
@@ -74,12 +78,18 @@ export async function reconcileProjectSupervisor(
   const configuredProjectIds = new Set(Object.keys(config.projects));
   const activeProjectIds = new Set(listLifecycleWorkers());
 
+  debug(
+    `reconcile start: configured=[${[...configuredProjectIds].join(",")}] attached=[${[...activeProjectIds].join(",")}]`,
+  );
+
   for (const projectId of activeProjectIds) {
     if (!configuredProjectIds.has(projectId)) {
       try {
+        debug(`detaching ${projectId} (no longer in config)`);
         stopLifecycleWorker(projectId);
         await removeProjectFromRunning(projectId);
       } catch (error) {
+        debug(`detach ${projectId} failed:`, error);
         reportProjectSupervisorError(
           observer,
           projectId,
@@ -92,19 +102,33 @@ export async function reconcileProjectSupervisor(
 
   for (const projectId of configuredProjectIds) {
     try {
-      const hasNonTerminalSession = await projectHasNonTerminalSession(config, projectId);
+      const sm = await getSessionManager(config);
+      const sessions = await sm.list(projectId);
+      const nonTerminal = sessions.filter((s) => !isTerminalSession(s));
+      const hasNonTerminalSession = nonTerminal.length > 0;
       const isAttached = listLifecycleWorkers().includes(projectId);
+
+      debug(
+        `${projectId}: sessions=${sessions.length} nonTerminal=${nonTerminal.length} attached=${isAttached}` +
+          (nonTerminal.length
+            ? ` ids=[${nonTerminal.map((s) => s.id).join(",")}]`
+            : ""),
+      );
 
       if (hasNonTerminalSession) {
         if (!isAttached) {
-          await ensureLifecycleWorker(config, projectId, options.intervalMs);
+          debug(`${projectId}: ensureLifecycleWorker (intervalMs=${options.intervalMs ?? "default"})`);
+          const status = await ensureLifecycleWorker(config, projectId, options.intervalMs);
+          debug(`${projectId}: ensureLifecycleWorker result running=${status.running} started=${status.started}`);
         }
         await addProjectToRunning(projectId);
       } else if (isAttached) {
+        debug(`${projectId}: stopping lifecycle worker (no non-terminal sessions)`);
         stopLifecycleWorker(projectId);
         await removeProjectFromRunning(projectId);
       }
     } catch (error) {
+      debug(`${projectId}: reconcile error:`, error);
       reportProjectSupervisorError(
         observer,
         projectId,
@@ -114,6 +138,8 @@ export async function reconcileProjectSupervisor(
       // Best-effort per project: a broken project must not block others from reconciling.
     }
   }
+
+  debug(`reconcile end: now-attached=[${listLifecycleWorkers().join(",")}]`);
 }
 
 export async function startProjectSupervisor(
