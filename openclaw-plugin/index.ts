@@ -159,19 +159,33 @@ interface FetchIssuesDeps {
 
 function resolveAoConfigPath(config: PluginConfig): string | null {
   const candidates: string[] = [];
-  const envPath = process.env.AO_CONFIG_PATH;
+
+  // Explicit overrides (most specific first).
+  // AO_CONFIG_PATH is the dashboard/runtime convention.
+  // AO_GLOBAL_CONFIG matches ao-core's getGlobalConfigPath() override.
+  const envPath = process.env.AO_CONFIG_PATH ?? process.env.AO_GLOBAL_CONFIG;
   if (envPath) candidates.push(resolve(envPath));
 
+  // Walk up the tree from aoCwd (or process.cwd) and try every reasonable name.
+  // Names match what core uses:
+  //   - global config:      ~/.agent-orchestrator/config.yaml   (getGlobalConfigPath)
+  //   - per-repo behavior:  <repo>/agent-orchestrator.yaml      (LOCAL_CONFIG_FILENAMES)
+  // Some setups also keep the global config under the project-style name; try both.
   let currentDir = resolve(config.aoCwd || process.cwd());
   while (true) {
     candidates.push(
       join(currentDir, "agent-orchestrator.yaml"),
       join(currentDir, "agent-orchestrator.yml"),
+      join(currentDir, "config.yaml"),
+      join(currentDir, "config.yml"),
     );
     const parentDir = dirname(currentDir);
     if (parentDir === currentDir) break;
     currentDir = parentDir;
   }
+
+  // Final fallback: ao-core's canonical global config path.
+  candidates.push(join(homedir(), ".agent-orchestrator", "config.yaml"));
 
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
