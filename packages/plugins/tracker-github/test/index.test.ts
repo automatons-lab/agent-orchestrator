@@ -167,6 +167,40 @@ describe("tracker-github plugin", () => {
       ghMock.mockResolvedValueOnce({ stdout: "not json{" });
       await expect(tracker.getIssue("123", project)).rejects.toThrow();
     });
+
+    it("renders Issue.branchName from project.branchNameTemplate", async () => {
+      mockGh({
+        ...sampleIssue,
+        number: 36,
+        title: "Expose window_start_message_id / window_end_message_id",
+      });
+      const issue = await tracker.getIssue("36", {
+        ...project,
+        branchNameTemplate: "{issue}.{slug}",
+      });
+      expect(issue.branchName).toBe("36.expose-window-start-message-id-window");
+    });
+
+    it("omits Issue.branchName when project.branchNameTemplate is unset", async () => {
+      mockGh(sampleIssue);
+      const issue = await tracker.getIssue("123", project);
+      expect(issue.branchName).toBeUndefined();
+    });
+
+    it("slugifies titles with diacritics, symbols, and emoji safely", async () => {
+      mockGh({
+        ...sampleIssue,
+        number: 7,
+        title: "Café \u26A1 — Réplica! @user/feature \u{1F6A8}",
+      });
+      const issue = await tracker.getIssue("7", {
+        ...project,
+        branchNameTemplate: "{issue}.{slug}",
+      });
+      expect(issue.branchName).toMatch(/^7\.[a-z0-9-]+$/);
+      expect(issue.branchName).not.toMatch(/--/);
+      expect(issue.branchName).not.toMatch(/-$/);
+    });
   });
 
   // ---- isCompleted -------------------------------------------------------

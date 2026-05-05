@@ -1523,6 +1523,15 @@ export interface ProjectConfig {
   /** Path to a file containing agent rules (relative to project path) */
   agentRulesFile?: string;
 
+  /**
+   * Template for issue-derived branch names. Placeholders:
+   *   {issue} — issue number
+   *   {slug}  — slugified issue title (lowercase, alphanumerics + dashes, max 40 chars)
+   * Example: "{issue}.{slug}" → "36.expose-window-message-ids"
+   * When unset, trackers fall back to their built-in default (e.g. "feat/issue-N").
+   */
+  branchNameTemplate?: string;
+
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;
 

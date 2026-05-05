@@ -20,6 +20,44 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Slugify an issue title into a git-branch-safe segment.
+ *   - lowercase
+ *   - non-alphanumeric runs collapsed to `-`
+ *   - leading/trailing `-` trimmed
+ *   - capped at 40 chars (broken at the last word boundary when possible)
+ */
+function slugifyTitle(title: string): string {
+  const lower = title
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  let slug = lower
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (slug.length > 40) {
+    slug = slug.slice(0, 40);
+    const lastDash = slug.lastIndexOf("-");
+    if (lastDash > 20) slug = slug.slice(0, lastDash);
+    slug = slug.replace(/-+$/g, "");
+  }
+  return slug;
+}
+
+/**
+ * Render a branch-name template by substituting `{issue}` and `{slug}`.
+ * Returns the rendered string (caller is responsible for git-safety check).
+ */
+function renderBranchTemplate(
+  template: string,
+  issueNumber: string,
+  title: string,
+): string {
+  return template
+    .replace(/\{issue\}/g, issueNumber)
+    .replace(/\{slug\}/g, slugifyTitle(title));
+}
+
 async function gh(args: string[]): Promise<string> {
   try {
     return await execGhObserved(args, { component: "tracker-github" }, 30_000);
@@ -217,6 +255,18 @@ function createGitHubTracker(): Tracker {
           labels: data.labels.map((l) => l.name),
           assignee: data.assignees[0]?.login,
         };
+
+        // If the project configures a branch-name template, render it now so
+        // session-manager picks it up via Issue.branchName (it prefers that
+        // over Tracker.branchName when the result is git-safe).
+        if (project.branchNameTemplate) {
+          const rendered = renderBranchTemplate(
+            project.branchNameTemplate,
+            String(data.number),
+            data.title,
+          );
+          if (rendered) issue.branchName = rendered;
+        }
 
         writeCachedIssue(repo, identifier, issue);
         return issue;
