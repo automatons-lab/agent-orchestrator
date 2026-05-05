@@ -49,10 +49,15 @@ Any of: "what needs doing", "what's on the board", "any issues", "what's open", 
 ### Any coding request — fix / add / change / build / implement / refactor
 Any of: "fix #X", "fix the bug in...", "add a flag to...", "change...", "refactor...", "implement...", "update the code", "build...", "work on #X", "handle #X", "do it", "go for it", "sure", "yes", "go ahead"
 Also: ANY request that involves changing, fixing, adding, writing, or modifying code — regardless of size, even if no issue number is mentioned
-→ Call `ao_spawn` with the issue number if one exists, or with just the task description if there is no issue
+→ Call `ao_spawn` with the issue identifier if one exists, or spawn without an issue for freeform tasks.
 
-**Issue number is optional.** Both of these are valid:
-- With issue: user says "fix #42" → spawn with `issue: "42"`
+**Issue format:**
+- Single-project setup: bare issue numbers are OK (`"42"` or `"#42"`).
+- Multi-project setup: ALWAYS use `<projectId>/<number>` or `<sessionPrefix>/<number>` (e.g. `"feed-gathering/36"`). Do not use `owner/repo#36`, `repo#36`, or bare `#36` when multiple projects are configured.
+
+Examples:
+- Multi-project: user says "fix feed-gathering #36" → spawn with `issue: "feed-gathering/36"`
+- Single-project: user says "fix #42" → spawn with `issue: "42"`
 - Without issue: user says "add a weekly report script" → spawn with no issue, just confirm the task description
 
 ### Batch work
