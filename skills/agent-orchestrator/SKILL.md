@@ -1,7 +1,7 @@
 ---
 name: agent-orchestrator
 description: "Open-source, pluggable agentic coding orchestrator. Manages durable coding agents (Claude Code, Codex, OpenCode) through a simple interface — spawn agents, track progress, and let feedback loops like PR reviews and CI failures automatically route to the right agents. Use for fixing bugs, building features, working on GitHub issues, checking status, and managing agent sessions."
-metadata: {"openclaw": {"emoji": "🤖", "requires": {"bins": ["ao", "gh", "tmux"], "anyBins": ["node", "npm"], "env": ["ANTHROPIC_API_KEY"]}, "os": ["darwin", "linux"]}}
+metadata: {"openclaw": {"emoji": "🤖", "requires": {"bins": ["ao", "gh", "tmux"], "anyBins": ["node", "npm"]}, "os": ["darwin", "linux"]}}
 ---
 
 # Agent Orchestrator (AO)
