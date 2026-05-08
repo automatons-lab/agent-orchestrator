@@ -228,7 +228,9 @@ function applyPreferences(
 
 function projectFromGlobalConfig(): PortfolioProject[] {
   try {
-    const config = loadConfig(getGlobalConfigPath());
+    // Honor AO_CONFIG_PATH for non-canonical setups (see project-supervisor.ts).
+    const configPath = process.env["AO_CONFIG_PATH"] ?? getGlobalConfigPath();
+    const config = loadConfig(configPath);
     const allEntries = [
       ...Object.entries(config.projects).map(([id, project]) => ({
         id,

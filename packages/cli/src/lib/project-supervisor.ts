@@ -73,7 +73,13 @@ async function projectHasNonTerminalSession(
 export async function reconcileProjectSupervisor(
   options: ReconcileProjectSupervisorOptions = {},
 ): Promise<void> {
-  const config = loadConfig(getGlobalConfigPath());
+  // Honor AO_CONFIG_PATH for non-canonical (single-file) setups so supervisor
+  // sees the real configured projects. getGlobalConfigPath() only reads
+  // AO_GLOBAL_CONFIG and falls back to ~/.agent-orchestrator/config.yaml,
+  // which is wrong when the operator points AO at a renamed file via
+  // AO_CONFIG_PATH (the path findConfigFile() also respects).
+  const configPath = process.env["AO_CONFIG_PATH"] ?? getGlobalConfigPath();
+  const config = loadConfig(configPath);
   const observer = createProjectObserver(config, "project-supervisor");
   const configuredProjectIds = new Set(Object.keys(config.projects));
   const activeProjectIds = new Set(listLifecycleWorkers());
