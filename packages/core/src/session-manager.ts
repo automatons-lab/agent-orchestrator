@@ -377,6 +377,14 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
   function getManagedWorkspaceRoots(projectId: string, projectPath: string): string[] {
     const roots = [getProjectWorktreesDir(projectId)];
+
+    // workspace-clone plugin's default cloneBaseDir (~/.ao-clones/<projectId>).
+    // Without this, kill() refuses to destroy clone-mode workspaces and the
+    // session dir gets orphaned in ~/.ao-clones/.
+    // NOTE: if plugin is reconfigured with `cloneDir`, this still misses it —
+    // a future iteration should ask the plugin for its actual base dir.
+    roots.push(join(homedir(), ".ao-clones", projectId));
+
     // Legacy: some worktrees live under ~/.worktrees/{basename}
     const legacyIds = new Set<string>();
     legacyIds.add(projectId);
