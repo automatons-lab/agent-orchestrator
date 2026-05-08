@@ -1262,6 +1262,13 @@ export interface ReactionConfig {
 
   /** Whether to include a summary in the notification */
   includeSummary?: boolean;
+
+  /** Glob-like patterns of CI check names to exclude when computing whether
+   *  this reaction should fire. Supports trailing-* wildcards. Useful for
+   *  ignoring AI review / linter-info checks that share PR status checks but
+   *  shouldn't route back to the worker as a CI failure (e.g. trinity reviewer
+   *  workflows or advisory bots). */
+  ignoreChecks?: string[];
 }
 
 export interface ReactionResult {

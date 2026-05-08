@@ -1705,6 +1705,19 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
    * Format CI check failures into a human-readable message for the agent.
    * Includes check names, statuses, and links for debugging.
    */
+  /**
+   * Test whether a CI check name matches one of the ignore patterns. Supports
+   * exact match and trailing-* wildcards (e.g. "ai-review*" matches
+   * "ai-review / call / review"). Empty/missing patterns list = nothing matches.
+   */
+  function isIgnoredCheck(name: string, patterns: string[] | undefined): boolean {
+    if (!patterns || patterns.length === 0) return false;
+    return patterns.some((pat) => {
+      if (pat.endsWith("*")) return name.startsWith(pat.slice(0, -1));
+      return pat === name;
+    });
+  }
+
   function formatCIFailureMessage(failedChecks: CICheck[]): string {
     const lines = ["CI checks are failing on your PR. Here are the failed checks:", ""];
     for (const check of failedChecks) {
@@ -1774,8 +1787,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       }
     }
 
+    const ciReactionConfig = config.reactions[ciReactionKey];
+    const ignorePatterns = ciReactionConfig?.ignoreChecks;
     const failedChecks = checks.filter(
-      (c) => c.status === "failed" || c.conclusion?.toUpperCase() === "FAILURE",
+      (c) =>
+        (c.status === "failed" || c.conclusion?.toUpperCase() === "FAILURE") &&
+        !isIgnoredCheck(c.name, ignorePatterns),
     );
     if (failedChecks.length === 0) return;
 
@@ -2197,12 +2214,19 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             const prKey = `${session.pr.owner}/${session.pr.repo}#${session.pr.number}`;
             const cachedData = prEnrichmentCache.get(prKey);
             if (cachedData?.ciChecks) {
-              const failedChecks = cachedData.ciChecks.filter((c) => c.status === "failed");
+              const ignore = reactionConfig.ignoreChecks;
+              const failedChecks = cachedData.ciChecks.filter(
+                (c) => c.status === "failed" && !isIgnoredCheck(c.name, ignore),
+              );
               if (failedChecks.length > 0) {
                 reactionConfig = {
                   ...reactionConfig,
                   message: formatCIFailureMessage(failedChecks),
                 };
+              } else {
+                // All failing checks are in the ignore list — suppress this reaction
+                // for this transition so the worker isn't pinged for advisory checks.
+                reactionConfig = null;
               }
             }
           }
