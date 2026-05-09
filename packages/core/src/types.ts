@@ -1301,6 +1301,17 @@ export interface ReactionConfig {
    *  shouldn't route back to the worker as a CI failure (e.g. trinity reviewer
    *  workflows or advisory bots). */
   ignoreChecks?: string[];
+
+  /** Maximum review rounds before the supervisor stops auto-routing review
+   *  comments to the worker and marks the session as "review-stuck" for human
+   *  attention. A round is one distinct fingerprint of pending review comments
+   *  — i.e. one trinity review with a new set of unresolved threads. After
+   *  reaching this count, AO stops calling executeReaction for changes-
+   *  requested on this session until the PR closes/merges, the worker is
+   *  manually nudged, or session.metadata.reviewRoundCount is reset.
+   *  Only meaningful for the "changes-requested" reaction.
+   *  Default in our config: 6. */
+  maxRounds?: number;
 }
 
 export interface ReactionResult {

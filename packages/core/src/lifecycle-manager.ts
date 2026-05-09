@@ -1569,6 +1569,16 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         updateSessionMetadata(session, {
           lastPendingReviewFingerprint: pendingFingerprint,
         });
+        // New review round detected (fingerprint differs from previous one):
+        // increment round count for max-rounds enforcement below.
+        if (pendingFingerprint && lastPendingFingerprint) {
+          // both sides non-empty — worker had previous round, now a new one
+          const prev = parseInt(session.metadata["reviewRoundCount"] ?? "0", 10) || 0;
+          updateSessionMetadata(session, { reviewRoundCount: String(prev + 1) });
+        } else if (pendingFingerprint && !lastPendingFingerprint) {
+          // first round on this PR
+          updateSessionMetadata(session, { reviewRoundCount: "1" });
+        }
       }
 
       if (!pendingFingerprint) {
@@ -1577,10 +1587,60 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           lastPendingReviewFingerprint: "",
           lastPendingReviewDispatchHash: "",
           lastPendingReviewDispatchAt: "",
+          reviewRoundCount: "",
+          reviewStuck: "",
         });
       } else if (pendingFingerprint !== lastPendingDispatchHash) {
         const reactionConfig = getReactionConfigForSession(session, humanReactionKey);
+        // Max-rounds gate: if review-round count exceeds the configured cap,
+        // stop auto-routing comments to the worker and mark the session as
+        // review-stuck. The reviewer auto-request loop continues independently
+        // (configured under "changes-requested" only here), so trinity will
+        // still be asked for a fresh review once the worker pushes — humans
+        // typically resolve this by chiming in on the PR or by manually
+        // clearing reviewRoundCount once the discussion settles.
+        const maxRounds = reactionConfig?.maxRounds;
+        const currentRoundCount = parseInt(
+          session.metadata["reviewRoundCount"] ?? "0",
+          10,
+        ) || 0;
         if (
+          typeof maxRounds === "number" &&
+          maxRounds > 0 &&
+          currentRoundCount > maxRounds
+        ) {
+          if (session.metadata["reviewStuck"] !== "1") {
+            updateSessionMetadata(session, { reviewStuck: "1" });
+            void notifyHuman(
+              {
+                id: `review-stuck-${session.id}-${Date.now()}`,
+                type: "session.needs_input",
+                priority: "urgent",
+                sessionId: session.id,
+                projectId: session.projectId,
+                timestamp: new Date(),
+                message: `Review-stuck: ${currentRoundCount} rounds (cap ${maxRounds}) on ${
+                  session.pr ? `PR #${session.pr.number}` : "this PR"
+                } — human attention required.`,
+                data: {
+                  rounds: currentRoundCount,
+                  maxRounds,
+                  reactionKey: humanReactionKey,
+                  prNumber: session.pr?.number ?? null,
+                },
+              },
+              "urgent",
+            ).catch(() => {});
+          }
+          // Update dispatch hash so we don't re-fire the gate on every poll;
+          // the gate is one-shot per fingerprint until the worker / reviewer
+          // produces a new round (different fingerprint).
+          updateSessionMetadata(session, {
+            lastPendingReviewDispatchHash: pendingFingerprint,
+            lastPendingReviewDispatchAt: new Date().toISOString(),
+          });
+          // Do NOT call executeReaction — worker stays unpoked.
+        } else if (
           reactionConfig &&
           reactionConfig.action &&
           (reactionConfig.auto !== false || reactionConfig.action === "notify")
