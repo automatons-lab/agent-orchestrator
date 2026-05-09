@@ -854,8 +854,18 @@ export interface SCM {
    * summaries). New SCM plugins should prefer implementing this method.
    *
    * @since 0.6.0 — replaces the removed `getAutomatedComments` method.
+   *
+   * @param options.forceFresh — bypass any in-plugin ETag/cache layer and
+   *   force a fresh GraphQL fetch. Lifecycle uses this when the PR head SHA
+   *   has advanced since the last call (worker pushed a fix), since the
+   *   conditional-request ETag on `/pulls/N/comments` doesn't reliably rotate
+   *   when a new review with inline suggestions arrives, leaving stale
+   *   thread state in the dashboard for several minutes.
    */
-  getReviewThreads?(pr: PRInfo): Promise<ReviewThreadsResult>;
+  getReviewThreads?(
+    pr: PRInfo,
+    options?: { forceFresh?: boolean },
+  ): Promise<ReviewThreadsResult>;
 
   // --- Merge Readiness ---
 

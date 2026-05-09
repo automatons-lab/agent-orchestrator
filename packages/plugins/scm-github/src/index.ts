@@ -1064,14 +1064,31 @@ function createGitHubSCM(): SCM {
       });
     },
 
-    async getReviewThreads(pr: PRInfo): Promise<ReviewThreadsResult> {
+    async getReviewThreads(
+      pr: PRInfo,
+      options?: { forceFresh?: boolean },
+    ): Promise<ReviewThreadsResult> {
       const cacheKey = `${pr.owner}/${pr.repo}#${pr.number}`;
 
-      // Guard 3: check if review comments changed via REST ETag
-      const reviewsChanged = await checkReviewCommentsETag(pr.owner, pr.repo, pr.number, instanceObserver);
-      if (!reviewsChanged) {
-        const cached = reviewThreadsCache.get(cacheKey);
-        if (cached) return cached;
+      // Guard 3: check if review comments changed via REST ETag.
+      // forceFresh=true bypasses the ETag/cache layer entirely — used by
+      // lifecycle when the PR head SHA advances (worker pushed a fix), since
+      // GitHub's conditional-request ETag on /pulls/N/comments doesn't rotate
+      // reliably when a new review with inline suggestions arrives.
+      if (!options?.forceFresh) {
+        const reviewsChanged = await checkReviewCommentsETag(
+          pr.owner,
+          pr.repo,
+          pr.number,
+          instanceObserver,
+        );
+        if (!reviewsChanged) {
+          const cached = reviewThreadsCache.get(cacheKey);
+          if (cached) return cached;
+        }
+      } else {
+        // Drop any cached value so a parallel non-force call can't hit it.
+        reviewThreadsCache.delete(cacheKey);
       }
 
       try {

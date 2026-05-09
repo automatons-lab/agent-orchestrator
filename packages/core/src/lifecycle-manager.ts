@@ -1505,7 +1505,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     let reviewSummaries: ReviewSummary[] = [];
     try {
       if (scm.getReviewThreads) {
-        const result = await scm.getReviewThreads(session.pr);
+        // Force a fresh fetch when the worker has pushed since the last
+        // review-backlog read — the in-plugin ETag cache otherwise serves
+        // stale data after trinity submits a new review on the new commit.
+        const result = await scm.getReviewThreads(session.pr, { forceFresh: headShaAdvanced });
         allThreads = result.threads;
         reviewSummaries = result.reviews;
       } else {
