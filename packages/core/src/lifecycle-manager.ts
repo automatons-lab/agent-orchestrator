@@ -499,6 +499,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
    * In-memory only — resets on restart (acceptable since it's a rate-limit hint, not state).
    */
   const lastReviewBacklogCheckAt = new Map<SessionId, number>();
+  /** Last PR head SHA observed when reviewBacklog was fetched. Used to bypass
+   *  the throttle when the worker pushes new commits — stale review-comments
+   *  data otherwise lingers in the dashboard for up to 2 minutes after a fix. */
+  const lastReviewBacklogCheckSha = new Map<SessionId, string>();
 
   /** Throttle interval for review backlog API calls (2 minutes). */
   const REVIEW_BACKLOG_THROTTLE_MS = 2 * 60 * 1000;
@@ -1479,7 +1483,17 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const hasRelevantTransition =
       transitionReaction?.key === humanReactionKey ||
       transitionReaction?.key === automatedReactionKey;
-    if (!hasRelevantTransition) {
+    // Detect a new push since the last review-backlog fetch — if the worker
+    // pushed a fix, the prior comment list is stale even when no reaction
+    // transition fires (e.g. trinity APPROVED with leftover inline suggestions,
+    // worker pushed a follow-up commit). Bypass the throttle so the dashboard
+    // sees the fresh state on the next poll instead of waiting 2 minutes.
+    const cachedHeadSha = prEnrichmentCache.get(
+      `${session.pr.owner}/${session.pr.repo}#${session.pr.number}`,
+    )?.headSha;
+    const lastCheckSha = lastReviewBacklogCheckSha.get(session.id) ?? "";
+    const headShaAdvanced = !!cachedHeadSha && cachedHeadSha !== lastCheckSha;
+    if (!hasRelevantTransition && !headShaAdvanced) {
       const lastCheckAt = lastReviewBacklogCheckAt.get(session.id) ?? 0;
       if (Date.now() - lastCheckAt < REVIEW_BACKLOG_THROTTLE_MS) {
         return;
@@ -1508,6 +1522,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // Only stamp the throttle after a successful SCM fetch. If the fetch failed,
     // we returned above so the next poll can retry without waiting 2 minutes.
     lastReviewBacklogCheckAt.set(session.id, Date.now());
+    if (cachedHeadSha) lastReviewBacklogCheckSha.set(session.id, cachedHeadSha);
 
     // Persist review comments + summaries to metadata for dashboard consumption
     {
@@ -2574,6 +2589,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         const sessionId = trackerKey.split(":")[0];
         if (sessionId && !currentSessionIds.has(sessionId)) {
           reactionTrackers.delete(trackerKey);
+        }
+      }
+      for (const sessionId of lastReviewBacklogCheckSha.keys()) {
+        if (!currentSessionIds.has(sessionId)) {
+          lastReviewBacklogCheckSha.delete(sessionId);
         }
       }
       for (const sessionId of lastReviewBacklogCheckAt.keys()) {
