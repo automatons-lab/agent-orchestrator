@@ -1024,6 +1024,7 @@ function extractPREnrichment(
     isBehind,
     blockers,
     ...(ciChecks !== undefined ? { ciChecks } : {}),
+    ...(headSha ? { headSha } : {}),
   };
 
   return { data, headSha };

@@ -816,6 +816,25 @@ export interface SCM {
 
   // --- Review Tracking ---
 
+  /**
+   * Get the GitHub logins currently in `requested_reviewers` for a PR.
+   * GitHub auto-removes a user from this list once they submit a review,
+   * which is what AO uses to detect "reviewer needs to be re-requested"
+   * after a worker pushes fix commits.
+   *
+   * Optional — plugins without this method skip auto-reviewer-routing.
+   */
+  getRequestedReviewers?(pr: PRInfo): Promise<string[]>;
+
+  /**
+   * Add the given GitHub logins (or team slugs prefixed with `team:`) to a
+   * PR's `requested_reviewers`. Idempotent: GitHub silently ignores duplicates,
+   * so it is safe for the supervisor to call this every poll cycle.
+   *
+   * Optional — plugins without this method skip auto-reviewer-routing.
+   */
+  requestReviewers?(pr: PRInfo, reviewers: string[]): Promise<void>;
+
   /** Get all reviews on a PR */
   getReviews(pr: PRInfo): Promise<Review[]>;
 
@@ -1091,6 +1110,9 @@ export interface PREnrichmentData {
   blockers?: string[];
   /** Individual CI check results (populated from batch enrichment when available) */
   ciChecks?: CICheck[];
+  /** Head commit SHA of the PR. Used by reviewer auto-routing to detect when
+   *  the worker has pushed new commits since the last reviewer re-request. */
+  headSha?: string;
 }
 
 /**
@@ -1538,6 +1560,17 @@ export interface ProjectConfig {
    * When unset, trackers fall back to their built-in default (e.g. "feat/issue-N").
    */
   branchNameTemplate?: string;
+
+  /**
+   * GitHub logins (or team slugs prefixed with `team:`) that AO should request
+   * as reviewers on every PR opened by a worker session, and re-request whenever
+   * GitHub auto-removes them from `requested_reviewers` after they submit a
+   * review (which happens after worker pushes fix commits in response to that
+   * review). The reconcile loop tops them up until reviewDecision === APPROVED
+   * or the PR closes/merges. Empty/unset = no auto-routing.
+   * Example: ["trinity-automaton"]  or  ["trinity-automaton", "team:reviewers"].
+   */
+  reviewers?: string[];
 
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;

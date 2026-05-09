@@ -845,6 +845,62 @@ function createGitHubSCM(): SCM {
       return "passing";
     },
 
+    async getRequestedReviewers(pr: PRInfo): Promise<string[]> {
+      // GitHub returns reviewers in two arrays: `users` (individual logins)
+      // and `teams` (team slugs). We surface team requests as `team:<slug>` so
+      // callers can pass them through configured reviewer lists symmetrically
+      // with `requestReviewers(["team:reviewers"])`.
+      try {
+        const raw = await gh([
+          "api",
+          `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/requested_reviewers`,
+        ]);
+        const data = JSON.parse(raw) as {
+          users?: Array<{ login: string }>;
+          teams?: Array<{ slug: string }>;
+        };
+        const users = (data.users ?? []).map((u) => u.login);
+        const teams = (data.teams ?? []).map((t) => `team:${t.slug}`);
+        return [...users, ...teams];
+      } catch {
+        return [];
+      }
+    },
+
+    async requestReviewers(pr: PRInfo, reviewers: string[]): Promise<void> {
+      if (reviewers.length === 0) return;
+      const users: string[] = [];
+      const teams: string[] = [];
+      for (const r of reviewers) {
+        if (r.startsWith("team:")) teams.push(r.slice(5));
+        else users.push(r);
+      }
+      // Build POST body for /pulls/:number/requested_reviewers. Idempotent:
+      // GitHub silently no-ops duplicates, returns 422 only when payload is
+      // empty or contains the PR author. Caller filters out already-requested
+      // logins via getRequestedReviewers, but errors are swallowed so a flaky
+      // call can't break the supervisor reconcile loop.
+      const args = [
+        "api",
+        "-X",
+        "POST",
+        `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/requested_reviewers`,
+      ];
+      for (const u of users) args.push("-f", `reviewers[]=${u}`);
+      for (const t of teams) args.push("-f", `team_reviewers[]=${t}`);
+      try {
+        await gh(args);
+      } catch (err) {
+        // Log but don't throw — supervisor will retry on next poll.
+        // Common 422 causes: PR author in list, reviewer already merged, etc.
+        console.warn(
+          `[scm-github] requestReviewers(${pr.owner}/${pr.repo}#${pr.number}, [${reviewers.join(",")}]) failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      invalidatePRCache(pr);
+    },
+
     async getReviews(pr: PRInfo): Promise<Review[]> {
       // 5s TTL — review array. Reviewers are async, so the lifecycle worker
       // sees a new review on its next poll cycle within 5s of the cache expiring.

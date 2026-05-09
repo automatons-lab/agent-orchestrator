@@ -280,6 +280,7 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   branchNameTemplate: z.string().optional(),
+  reviewers: z.array(z.string()).optional(),
   orchestratorRules: z.string().optional(),
   orchestratorSessionStrategy: z
     .enum(["reuse", "delete", "ignore", "delete-new", "ignore-new", "kill-previous"])

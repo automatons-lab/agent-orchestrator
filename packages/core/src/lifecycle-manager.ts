@@ -1729,6 +1729,85 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     return lines.join("\n");
   }
 
+  /**
+   * Auto-request reviewers configured in `project.reviewers`. Triggers fresh
+   * review-request notification (and re-runs any `on: pull_request:
+   * types: [review_requested]` workflows, e.g. the trinity AI review pipeline)
+   * each time the worker pushes new commits.
+   *
+   * Mechanism:
+   *   GitHub keeps a reviewer in `requested_reviewers` after they submit a
+   *   review (it's the *review* that gets dismissed by `dismiss_stale_reviews
+   *   _on_push`, not the reviewer). POSTing the same reviewer back to
+   *   `requested_reviewers` fires a fresh `review_requested` event regardless,
+   *   which is exactly what the GitHub UI's "Re-request review" button does.
+   *
+   * Idempotency strategy:
+   *   We track `lastReviewRequestedSha` in session metadata. The reconcile
+   *   loop only POSTs when the PR head SHA differs from the last requested
+   *   SHA. Without this guard, every 30s reconcile would spam reviewers with
+   *   identical requests for the same commit.
+   *
+   * Stop conditions (skip the call):
+   *   - PR closed / merged — kill path will tear the session down
+   *   - reviewDecision === APPROVED *and* zero unresolved threads
+   *     (true "clean approval" state — nothing for the worker to fix; with
+   *     `required_review_thread_resolution=true` the merge button is live)
+   *
+   * Best-effort: requestReviewers errors are logged and swallowed; the next
+   * push will re-trigger the attempt. SCM plugin without `requestReviewers`
+   * silently skips (auto-routing is opt-in).
+   */
+  async function maybeAutoRequestReviewers(session: Session): Promise<void> {
+    if (!session.pr) return;
+    const project = config.projects[session.projectId];
+    if (!project) return;
+    const reviewers = project.reviewers ?? [];
+    if (reviewers.length === 0) return;
+
+    const scm = project.scm?.plugin ? registry.get<SCM>("scm", project.scm.plugin) : null;
+    if (!scm?.requestReviewers) return;
+
+    const cached = prEnrichmentCache.get(
+      `${session.pr.owner}/${session.pr.repo}#${session.pr.number}`,
+    );
+    if (!cached) return;
+
+    // Skip when PR is closed/merged.
+    if (cached.state === "closed" || cached.state === "merged") return;
+
+    // Skip when cleanly approved (no unresolved threads). unresolvedThreads is
+    // populated by maybeDispatchReviewBacklog into session metadata.
+    if (cached.reviewDecision === "approved") {
+      const reviewBlob = session.metadata["prReviewComments"];
+      let unresolvedThreads = 0;
+      if (reviewBlob) {
+        try {
+          const data = JSON.parse(reviewBlob) as { unresolvedThreads?: number };
+          unresolvedThreads = data.unresolvedThreads ?? 0;
+        } catch {
+          unresolvedThreads = 0;
+        }
+      }
+      if (unresolvedThreads === 0) return;
+    }
+
+    // Need head SHA to gate the request — without it we'd spam every cycle.
+    const headSha = cached.headSha;
+    if (!headSha) return;
+
+    const lastRequestedSha = session.metadata["lastReviewRequestedSha"] ?? "";
+    if (headSha === lastRequestedSha) return;
+
+    try {
+      await scm.requestReviewers(session.pr, reviewers);
+      updateSessionMetadata(session, { lastReviewRequestedSha: headSha });
+    } catch {
+      // requestReviewers itself swallows errors but defensive catch here too.
+      // Leave lastReviewRequestedSha unchanged so next cycle retries.
+    }
+  }
+
   async function maybeDispatchCIFailureDetails(
     session: Session,
     _oldStatus: SessionStatus,
@@ -2362,6 +2441,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       maybeDispatchReviewBacklog(session, oldStatus, newStatus, transitionReaction),
       maybeDispatchMergeConflicts(session, newStatus),
       maybeDispatchCIFailureDetails(session, oldStatus, newStatus, transitionReaction),
+      maybeAutoRequestReviewers(session),
     ]);
 
     // Report watcher: audit agent reports for issues (#140)
