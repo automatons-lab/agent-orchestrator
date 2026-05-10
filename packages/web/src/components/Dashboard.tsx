@@ -366,9 +366,14 @@ function DashboardInner({
   );
 
   const handleMerge = useCallback(
-    async (prNumber: number) => {
+    async (prNumber: number, projectId: string) => {
       try {
-        const res = await fetch(`/api/prs/${prNumber}/merge`, { method: "POST" });
+        // Pass projectId so the route handler can disambiguate when the
+        // same PR number exists in multiple projects (each repo numbers
+        // PRs independently). Without it the backend can't tell which
+        // session.pr to merge and falls back to a heuristic.
+        const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+        const res = await fetch(`/api/prs/${prNumber}/merge${qs}`, { method: "POST" });
         if (!res.ok) {
           const text = await res.text();
           console.error(`Failed to merge PR #${prNumber}:`, text);

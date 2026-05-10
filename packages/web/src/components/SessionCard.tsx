@@ -31,7 +31,7 @@ interface SessionCardProps {
   session: DashboardSession;
   onSend?: (sessionId: string, message: string) => Promise<void> | void;
   onKill?: (sessionId: string) => void;
-  onMerge?: (prNumber: number) => void;
+  onMerge?: (prNumber: number, projectId: string) => void;
   onRestore?: (sessionId: string) => void;
 }
 
@@ -830,7 +830,7 @@ function SessionCardView({ session, onSend, onKill, onMerge, onRestore }: Sessio
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onMerge?.(pr.number);
+                onMerge?.(pr.number, session.projectId);
               }}
               className="session-card__control session-card__merge-control"
             >
