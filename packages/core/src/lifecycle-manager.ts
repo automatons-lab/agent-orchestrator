@@ -1854,6 +1854,14 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // Skip when PR is closed/merged.
     if (cached.state === "closed" || cached.state === "merged") return;
 
+    // Skip when CI is currently failing on this commit. Routing the reviewer
+    // here would burn a full review pass on code the worker already needs to
+    // patch — better to let CI fixing run, push the fix, and let the next
+    // headSha advance trigger the request from a green/pending state.
+    // Pending CI is fine: reviewer + CI can run in parallel since they check
+    // different things and merging needs both anyway.
+    if (cached.ciStatus === "failing") return;
+
     // Skip when cleanly approved (no unresolved threads). unresolvedThreads is
     // populated by maybeDispatchReviewBacklog into session metadata.
     if (cached.reviewDecision === "approved") {
