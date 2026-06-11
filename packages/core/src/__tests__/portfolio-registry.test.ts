@@ -31,6 +31,10 @@ describe("portfolio-registry", () => {
     oldConfigPath = process.env["AO_CONFIG_PATH"];
     oldHome = process.env["HOME"];
     oldUserProfile = process.env["USERPROFILE"];
+    // Clear AO_CONFIG_PATH so a developer machine running AO with a custom
+    // config path doesn't leak its real projects into these tests. Tests that
+    // exercise the AO_CONFIG_PATH preference set it explicitly.
+    delete process.env["AO_CONFIG_PATH"];
     process.env["HOME"] = tempRoot;
     process.env["USERPROFILE"] = tempRoot;
   });

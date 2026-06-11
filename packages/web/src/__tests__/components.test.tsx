@@ -320,7 +320,7 @@ describe("SessionCard", () => {
     const session = makeSession({ status: "mergeable", activity: "idle", pr });
     render(<SessionCard session={session} onMerge={onMerge} />);
     fireEvent.click(screen.getByRole("button", { name: /merge/i }));
-    expect(onMerge).toHaveBeenCalledWith(42, "acme", "app");
+    expect(onMerge).toHaveBeenCalledWith(42, "my-app", "acme", "app");
   });
 
   it("does not render passing CI check chips on the card", () => {
