@@ -37,14 +37,14 @@ notifiers:
   assert.deepEqual(extractConfiguredReposFromYaml(rawYaml), ["acme/app", "acme/docs"]);
 });
 
-test("fetchIssues queries every configured repo when repo is omitted", () => {
+test("fetchIssues queries every configured repo when repo is omitted", async () => {
   const ghCalls: string[] = [];
-  const result = fetchIssues(
+  const result = await fetchIssues(
     { aoCwd: "/tmp/work" },
     {},
     {
       getConfiguredRepos: () => ["acme/app", "acme/docs"],
-      runGh: (_config, args) => {
+      runGh: async (_config, args) => {
         const repoIndex = args.indexOf("-R");
         const repo = repoIndex >= 0 ? args[repoIndex + 1] : "default";
         ghCalls.push(repo);
@@ -73,13 +73,13 @@ test("fetchIssues queries every configured repo when repo is omitted", () => {
   );
 });
 
-test("fetchIssues surfaces GitHub failures instead of reporting an empty board", () => {
-  const result = fetchIssues(
+test("fetchIssues surfaces GitHub failures instead of reporting an empty board", async () => {
+  const result = await fetchIssues(
     { aoCwd: "/tmp/work" },
     {},
     {
       getConfiguredRepos: () => ["acme/app"],
-      runGh: () => ({ ok: false, error: "gh auth token missing" }),
+      runGh: async () => ({ ok: false, error: "gh auth token missing" }),
     },
   );
 
@@ -88,13 +88,13 @@ test("fetchIssues surfaces GitHub failures instead of reporting an empty board",
   assert.match(result.error, /gh auth token missing/);
 });
 
-test("fetchIssues keeps partial failures visible when at least one repo succeeds", () => {
-  const result = fetchIssues(
+test("fetchIssues keeps partial failures visible when at least one repo succeeds", async () => {
+  const result = await fetchIssues(
     { aoCwd: "/tmp/work" },
     {},
     {
       getConfiguredRepos: () => ["acme/app", "acme/docs"],
-      runGh: (_config, args) => {
+      runGh: async (_config, args) => {
         const repoIndex = args.indexOf("-R");
         const repo = repoIndex >= 0 ? args[repoIndex + 1] : "default";
         if (repo === "acme/app") {

@@ -14,10 +14,13 @@
  * - Background services: health monitoring + issue board scanner + auto follow-up
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,8 +38,16 @@ interface PluginConfig {
 interface PluginApi {
   pluginConfig?: PluginConfig;
   logger: { info: (msg: string) => void; warn: (msg: string) => void };
-  on?: (name: string, handler: (event: PluginEvent) => Promise<void>, opts?: { priority: number }) => void;
-  registerHook?: (name: string, handler: (event: PluginEvent) => Promise<void>, opts?: { priority: number }) => void;
+  on?: (
+    name: string,
+    handler: (event: PluginEvent) => Promise<void>,
+    opts?: { priority: number },
+  ) => void;
+  registerHook?: (
+    name: string,
+    handler: (event: PluginEvent) => Promise<void>,
+    opts?: { priority: number },
+  ) => void;
   registerCommand?: (cmd: CommandRegistration) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
   registerService?: (svc: Record<string, unknown>) => void;
@@ -78,23 +89,34 @@ interface CommandContext {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function runCmd(bin: string, args: string[], timeoutMs: number = 15_000, cwd?: string): string {
-  return execFileSync(bin, args, {
+// NOTE: must stay async (execFile, not execFileSync). The OpenClaw plugin runs
+// inside the gateway's Node event loop. A synchronous execFileSync blocks that
+// loop for the whole child-process duration, so any `ao` subcommand that calls
+// back into the same gateway over HTTP (e.g. `ao doctor` notifier-connectivity
+// probe to 127.0.0.1:18789) deadlocks against the blocked loop and fails.
+async function runCmd(
+  bin: string,
+  args: string[],
+  timeoutMs: number = 15_000,
+  cwd?: string,
+): Promise<string> {
+  const { stdout } = await execFileAsync(bin, args, {
     encoding: "utf-8",
     timeout: timeoutMs,
     cwd,
     env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
-  }).trim();
+  });
+  return stdout.trim();
 }
 
-function tryRun(
+async function tryRun(
   bin: string,
   args: string[],
   timeoutMs?: number,
   cwd?: string,
-): { ok: true; output: string } | { ok: false; error: string } {
+): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
   try {
-    return { ok: true, output: runCmd(bin, args, timeoutMs, cwd) };
+    return { ok: true, output: await runCmd(bin, args, timeoutMs, cwd) };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: message };
@@ -425,8 +447,8 @@ function readOpenClawConfig(): Record<string, unknown> | null {
   }
 }
 
-function readOpenClawStringArraySetting(setting: string, path: string[]): string[] {
-  const cliResult = tryRun("openclaw", ["config", "get", setting], 5_000);
+async function readOpenClawStringArraySetting(setting: string, path: string[]): Promise<string[]> {
+  const cliResult = await tryRun("openclaw", ["config", "get", setting], 5_000);
   if (cliResult.ok) {
     const parsed = parseStringArraySetting(cliResult.output);
     if (parsed) return parsed;
@@ -446,14 +468,14 @@ function readOpenClawStringArraySetting(setting: string, path: string[]): string
   return [];
 }
 
-export function fetchIssues(
+export async function fetchIssues(
   config: PluginConfig,
   options: FetchIssuesOptions = {},
   deps: FetchIssuesDeps = {
     getConfiguredRepos,
     runGh: tryRunGh,
   },
-): FetchIssuesResult {
+): Promise<FetchIssuesResult> {
   const repos = options.repo ? [options.repo] : deps.getConfiguredRepos(config);
   const targets = repos.length > 0 ? repos : [undefined];
   const issues: GitHubIssue[] = [];
@@ -474,7 +496,7 @@ export function fetchIssues(
       "30",
     );
 
-    const result = deps.runGh(config, args, 15_000);
+    const result = await deps.runGh(config, args, 15_000);
     if (!result.ok) {
       warnings.push(`${repoLabel}: ${result.error}`);
       continue;
@@ -550,7 +572,7 @@ async function spawnWithRetry(
 ): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
   let lastResult: { ok: true; output: string } | { ok: false; error: string } | undefined;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    lastResult = tryRunAo(config, issueArgs, 30_000);
+    lastResult = await tryRunAo(config, issueArgs, 30_000);
     if (lastResult.ok) return lastResult;
     // Only retry on transient errors, not config/auth errors
     if (
@@ -630,10 +652,12 @@ export default function (api: PluginApi) {
   // =========================================================================
 
   /** Build a live-data context block from AO + GitHub */
-  function buildLiveContext(): string | null {
+  async function buildLiveContext(): Promise<string | null> {
     try {
-      const issuesResult = fetchIssues(config);
-      const sessionsResult = tryRunAo(config, ["status"], 10_000);
+      const [issuesResult, sessionsResult] = await Promise.all([
+        fetchIssues(config),
+        tryRunAo(config, ["status"], 10_000),
+      ]);
 
       const issuesSummary = !issuesResult.ok
         ? issuesResult.error
@@ -716,7 +740,7 @@ export default function (api: PluginApi) {
     if (pendingWorkSessions.has(key)) {
       pendingWorkSessions.delete(key);
       api.logger.info("[ao-hook] Injecting live data into prompt context...");
-      const context = buildLiveContext();
+      const context = await buildLiveContext();
       if (context) routingContext.push(context);
     }
 
@@ -779,14 +803,14 @@ export default function (api: PluginApi) {
 
       switch (subcommand) {
         case "sessions": {
-          const result = tryRunAo(config, ["status"]);
+          const result = await tryRunAo(config, ["status"]);
           if (!result.ok) return { text: `Failed to get sessions:\n${result.error}` };
           return { text: result.output || "No active sessions." };
         }
 
         case "status": {
           // `ao status` shows all sessions; no per-session lookup available
-          const result = tryRunAo(config, ["status"]);
+          const result = await tryRunAo(config, ["status"]);
           if (!result.ok) return { text: `Failed:\n${result.error}` };
           return { text: result.output };
         }
@@ -804,7 +828,7 @@ export default function (api: PluginApi) {
         }
 
         case "issues": {
-          const issuesResult = fetchIssues(config, { repo: rest || undefined });
+          const issuesResult = await fetchIssues(config, { repo: rest || undefined });
           if (!issuesResult.ok) return { text: issuesResult.error };
 
           const lines = [formatIssueList(issuesResult.issues)];
@@ -822,7 +846,7 @@ export default function (api: PluginApi) {
           const issueArgs = rest.split(/\s+/).map(sanitizeArg);
           if (!issueArgs.every(isValidIssueId))
             return { text: `Invalid issue identifiers. Expected numbers like: 42 43 44` };
-          const result = tryRunAo(config, ["batch-spawn", ...issueArgs], 60_000);
+          const result = await tryRunAo(config, ["batch-spawn", ...issueArgs], 60_000);
           if (!result.ok) return { text: `Failed to batch-spawn:\n${result.error}` };
           return { text: result.output };
         }
@@ -832,7 +856,11 @@ export default function (api: PluginApi) {
           const sessionId = sanitizeArg(rest.trim());
           if (!isValidSessionId(sessionId))
             return { text: `Invalid session ID: ${rest}. Expected format like ao-42.` };
-          const result = tryRunAo(config, ["send", sessionId, "Please retry the failed task."]);
+          const result = await tryRunAo(config, [
+            "send",
+            sessionId,
+            "Please retry the failed task.",
+          ]);
           if (!result.ok) return { text: `Failed to send retry:\n${result.error}` };
           return { text: `Retry sent to session ${sessionId}.` };
         }
@@ -842,13 +870,13 @@ export default function (api: PluginApi) {
           const sessionId = sanitizeArg(rest.trim());
           if (!isValidSessionId(sessionId))
             return { text: `Invalid session ID: ${rest}. Expected format like ao-42.` };
-          const result = tryRunAo(config, ["session", "kill", sessionId]);
+          const result = await tryRunAo(config, ["session", "kill", sessionId]);
           if (!result.ok) return { text: `Failed to kill session:\n${result.error}` };
           return { text: `Session ${sessionId} killed.` };
         }
 
         case "doctor": {
-          const result = tryRunAo(config, ["doctor"], 30_000);
+          const result = await tryRunAo(config, ["doctor"], 30_000);
           if (!result.ok) return { text: `Failed to run doctor:\n${result.error}` };
           return { text: result.output };
         }
@@ -856,9 +884,9 @@ export default function (api: PluginApi) {
         case "setup": {
           // Auto-configure OpenClaw settings for AO plugin
           const steps: string[] = [];
-          const runSetup = (bin: string, args: string[]): boolean => {
+          const runSetup = async (bin: string, args: string[]): Promise<boolean> => {
             try {
-              execFileSync(bin, args, { encoding: "utf-8", timeout: 10_000 });
+              await execFileAsync(bin, args, { encoding: "utf-8", timeout: 10_000 });
               return true;
             } catch {
               return false;
@@ -866,28 +894,33 @@ export default function (api: PluginApi) {
           };
 
           // 1. tools.profile must be "full" for plugin tools to be visible
-          if (runSetup("openclaw", ["config", "set", "tools.profile", "full"]))
+          if (await runSetup("openclaw", ["config", "set", "tools.profile", "full"]))
             steps.push("✅ tools.profile → full");
           else steps.push("❌ Failed to set tools.profile");
 
           // 2. Allow plugin tools
           const mergedToolsAllow = mergeStringLists(
-            readOpenClawStringArraySetting("tools.allow", ["tools", "allow"]),
+            await readOpenClawStringArraySetting("tools.allow", ["tools", "allow"]),
             ["group:plugins"],
           );
           if (
-            runSetup("openclaw", ["config", "set", "tools.allow", JSON.stringify(mergedToolsAllow)])
+            await runSetup("openclaw", [
+              "config",
+              "set",
+              "tools.allow",
+              JSON.stringify(mergedToolsAllow),
+            ])
           ) {
             steps.push(`✅ tools.allow → ${mergedToolsAllow.join(", ")}`);
           } else steps.push("❌ Failed to set tools.allow");
 
           // 3. Trust the plugin
           const mergedPluginsAllow = mergeStringLists(
-            readOpenClawStringArraySetting("plugins.allow", ["plugins", "allow"]),
+            await readOpenClawStringArraySetting("plugins.allow", ["plugins", "allow"]),
             ["agent-orchestrator"],
           );
           if (
-            runSetup("openclaw", [
+            await runSetup("openclaw", [
               "config",
               "set",
               "plugins.allow",
@@ -898,7 +931,9 @@ export default function (api: PluginApi) {
           } else steps.push("❌ Failed to set plugins.allow");
 
           // 4. Group chat settings
-          if (runSetup("openclaw", ["config", "set", "messages.groupChat.historyLimit", "100"]))
+          if (
+            await runSetup("openclaw", ["config", "set", "messages.groupChat.historyLimit", "100"])
+          )
             steps.push("✅ historyLimit → 100");
           else steps.push("⚠️ Could not set historyLimit");
 
@@ -909,7 +944,9 @@ export default function (api: PluginApi) {
           steps.push("⚠️  Action required — run these once to avoid conflicts:");
           steps.push("   openclaw config set skills.entries.coding-agent.enabled false");
           steps.push("   openclaw config set skills.entries.gh-issues.enabled false");
-          steps.push('   openclaw config set tools.deny \'["exec","write","str_replace_based_edit_tool","create_file","str_replace_editor"]\'');
+          steps.push(
+            '   openclaw config set tools.deny \'["exec","write","str_replace_based_edit_tool","create_file","str_replace_editor"]\'',
+          );
           steps.push("Without these, the bot may code directly instead of delegating to AO.");
 
           return { text: `AO Plugin Setup\n\n${steps.join("\n")}` };
@@ -945,7 +982,7 @@ export default function (api: PluginApi) {
       "their status, branches, and progress. Use when the user asks about status or progress.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
-      const result = tryRunAo(config, ["status"]);
+      const result = await tryRunAo(config, ["status"]);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Failed to get sessions: ${result.error}` }],
@@ -978,7 +1015,7 @@ export default function (api: PluginApi) {
       required: [],
     },
     async execute(_toolCallId: string, params: { repo?: string; labels?: string }) {
-      const result = fetchIssues(config, params);
+      const result = await fetchIssues(config, params);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: result.error }],
@@ -1066,7 +1103,11 @@ export default function (api: PluginApi) {
       required: ["issues"],
     },
     async execute(_toolCallId: string, params: { issues: string[] }) {
-      const result = tryRunAo(config, ["batch-spawn", ...params.issues.map(sanitizeCliArg)], 60_000);
+      const result = await tryRunAo(
+        config,
+        ["batch-spawn", ...params.issues.map(sanitizeCliArg)],
+        60_000,
+      );
 
       if (!result.ok) {
         return {
@@ -1076,8 +1117,8 @@ export default function (api: PluginApi) {
       }
 
       // Schedule auto follow-ups
-      const checkStatus = (label: string) => {
-        const status = tryRunAo(config, ["status"], 10_000);
+      const checkStatus = async (label: string) => {
+        const status = await tryRunAo(config, ["status"], 10_000);
         const msg = status.ok ? status.output : "Could not reach AO for status check.";
         try {
           api.runtime?.sendMessageToDefaultSession?.(
@@ -1089,10 +1130,10 @@ export default function (api: PluginApi) {
       };
 
       batchSpawnFollowUpTimeouts.push(
-        setTimeout(() => checkStatus("Progress check (3 min)"), 3 * 60_000),
+        setTimeout(() => void checkStatus("Progress check (3 min)"), 3 * 60_000),
       );
       batchSpawnFollowUpTimeouts.push(
-        setTimeout(() => checkStatus("Status update (8 min)"), 8 * 60_000),
+        setTimeout(() => void checkStatus("Status update (8 min)"), 8 * 60_000),
       );
 
       api.logger.info("[ao-batch] Scheduled auto follow-ups at 3min and 8min");
@@ -1122,7 +1163,11 @@ export default function (api: PluginApi) {
       required: ["sessionId", "message"],
     },
     async execute(_toolCallId: string, params: { sessionId: string; message: string }) {
-      const result = tryRunAo(config, ["send", sanitizeCliArg(params.sessionId), params.message]);
+      const result = await tryRunAo(config, [
+        "send",
+        sanitizeCliArg(params.sessionId),
+        params.message,
+      ]);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Failed to send: ${result.error}` }],
@@ -1147,7 +1192,7 @@ export default function (api: PluginApi) {
       required: ["sessionId"],
     },
     async execute(_toolCallId: string, params: { sessionId: string }) {
-      const result = tryRunAo(config, ["session", "kill", sanitizeCliArg(params.sessionId)]);
+      const result = await tryRunAo(config, ["session", "kill", sanitizeCliArg(params.sessionId)]);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Failed to kill: ${result.error}` }],
@@ -1167,7 +1212,7 @@ export default function (api: PluginApi) {
     description: "Run Agent Orchestrator health checks. Use when troubleshooting.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
-      const result = tryRunAo(config, ["doctor"], 30_000);
+      const result = await tryRunAo(config, ["doctor"], 30_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Doctor failed: ${result.error}` }],
@@ -1196,7 +1241,7 @@ export default function (api: PluginApi) {
       const args = ["review-check"];
       if (params.project) args.push(sanitizeCliArg(params.project));
       if (params.dryRun) args.push("--dry-run");
-      const result = tryRunAo(config, args, 30_000);
+      const result = await tryRunAo(config, args, 30_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Review check failed: ${result.error}` }],
@@ -1257,7 +1302,7 @@ export default function (api: PluginApi) {
         if (params.fail) args.push("--fail");
         if (params.comment) args.push("-c", params.comment);
       }
-      const result = tryRunAo(config, args, 15_000);
+      const result = await tryRunAo(config, args, 15_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Verify failed: ${result.error}` }],
@@ -1285,7 +1330,7 @@ export default function (api: PluginApi) {
       const args = ["session", "cleanup"];
       if (params.project) args.push("-p", sanitizeCliArg(params.project));
       if (params.dryRun) args.push("--dry-run");
-      const result = tryRunAo(config, args, 30_000);
+      const result = await tryRunAo(config, args, 30_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Cleanup failed: ${result.error}` }],
@@ -1309,7 +1354,11 @@ export default function (api: PluginApi) {
       required: ["sessionId"],
     },
     async execute(_toolCallId: string, params: { sessionId: string }) {
-      const result = tryRunAo(config, ["session", "restore", sanitizeCliArg(params.sessionId)], 30_000);
+      const result = await tryRunAo(
+        config,
+        ["session", "restore", sanitizeCliArg(params.sessionId)],
+        30_000,
+      );
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Restore failed: ${result.error}` }],
@@ -1344,7 +1393,7 @@ export default function (api: PluginApi) {
       const args = ["session", "claim-pr", params.pr];
       if (params.sessionId) args.push(params.sessionId);
       if (params.assignOnGithub) args.push("--assign-on-github");
-      const result = tryRunAo(config, args, 15_000);
+      const result = await tryRunAo(config, args, 15_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Claim PR failed: ${result.error}` }],
@@ -1370,7 +1419,7 @@ export default function (api: PluginApi) {
     async execute(_toolCallId: string, params: { project?: string }) {
       const args = ["session", "ls"];
       if (params.project) args.push("-p", params.project);
-      const result = tryRunAo(config, args, 15_000);
+      const result = await tryRunAo(config, args, 15_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Session list failed: ${result.error}` }],
@@ -1398,7 +1447,7 @@ export default function (api: PluginApi) {
       const args = ["status"];
       if (params.project) args.push("-p", params.project);
       if (params.json) args.push("--json");
-      const result = tryRunAo(config, args, 15_000);
+      const result = await tryRunAo(config, args, 15_000);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Status failed: ${result.error}` }],
@@ -1429,10 +1478,12 @@ export default function (api: PluginApi) {
 
       api.logger.info(`[ao-health] Starting (every ${pollMs / 1000}s)`);
       healthInterval = setInterval(() => {
-        const result = tryRunAo(config, ["status"], 10_000);
-        if (!result.ok) {
-          api.logger.warn(`[ao-health] AO unreachable: ${result.error}`);
-        }
+        void (async () => {
+          const result = await tryRunAo(config, ["status"], 10_000);
+          if (!result.ok) {
+            api.logger.warn(`[ao-health] AO unreachable: ${result.error}`);
+          }
+        })();
       }, pollMs);
     },
     stop: async () => {
@@ -1456,9 +1507,9 @@ export default function (api: PluginApi) {
 
       api.logger.info(`[ao-board-scanner] Starting (every ${scanMs / 60_000}min)`);
 
-      const scan = () => {
+      const scan = async () => {
         try {
-          const issuesResult = fetchIssues(config);
+          const issuesResult = await fetchIssues(config);
           if (!issuesResult.ok) {
             api.logger.warn(`[ao-board-scanner] ${issuesResult.error}`);
             return;
@@ -1503,8 +1554,8 @@ export default function (api: PluginApi) {
         }
       };
 
-      boardScanInitialTimeout = setTimeout(scan, 10_000);
-      boardScanInterval = setInterval(scan, scanMs);
+      boardScanInitialTimeout = setTimeout(() => void scan(), 10_000);
+      boardScanInterval = setInterval(() => void scan(), scanMs);
     },
     stop: async () => {
       if (boardScanInitialTimeout) {

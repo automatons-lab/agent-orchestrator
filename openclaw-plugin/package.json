@@ -1,6 +1,6 @@
 {
   "name": "composio-ao-plugin",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "OpenClaw plugin for Agent Orchestrator — AI tools, slash commands, hooks, and health monitoring for managing parallel coding agents from OpenClaw",
   "license": "MIT",
   "author": "Dhruv Sharma (https://github.com/illegalcall)",
@@ -10,10 +10,9 @@
   "type": "module",
   "main": "index.ts",
   "openclaw": {
-    "extensions": ["./index.ts"],
-    "compat": {
-      "pluginApi": "1"
-    }
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "files": [
     "index.ts",
@@ -27,7 +26,15 @@
   },
   "homepage": "https://github.com/ComposioHQ/agent-orchestrator/tree/main/openclaw-plugin",
   "bugs": "https://github.com/ComposioHQ/agent-orchestrator/issues",
-  "keywords": ["openclaw", "openclaw-plugin", "plugin", "agent-orchestrator", "composio", "ai-agents", "coding-agents"],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "plugin",
+    "agent-orchestrator",
+    "composio",
+    "ai-agents",
+    "coding-agents"
+  ],
   "publishConfig": {
     "access": "public"
   }
