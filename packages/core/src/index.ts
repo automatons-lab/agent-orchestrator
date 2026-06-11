@@ -41,7 +41,61 @@ export {
   listMetadata,
 } from "./metadata.js";
 export { createInitialCanonicalLifecycle, deriveLegacyStatus } from "./lifecycle-state.js";
+export {
+  resolveAgentSelection,
+  resolveAgentSelectionForSession,
+  resolveSessionRole,
+  type ResolvedAgentSelection,
+  type SessionRole,
+} from "./agent-selection.js";
 export { sessionFromMetadata } from "./utils/session-from-metadata.js";
+
+// AO-local code review store
+export { CodeReviewStore, createCodeReviewStore } from "./code-review-store.js";
+export type {
+  CodeReviewFinding,
+  CodeReviewFindingStatus,
+  CodeReviewRun,
+  CodeReviewRunStatus,
+  CodeReviewRunSummary,
+  CodeReviewSeverity,
+  CodeReviewStoreOptions,
+  CreateCodeReviewFindingInput,
+  CreateCodeReviewRunInput,
+  ListCodeReviewFindingsFilter,
+  ListCodeReviewRunsFilter,
+} from "./code-review-store.js";
+export {
+  CodeReviewInvalidSessionError,
+  CodeReviewNoOpenFindingsError,
+  CodeReviewRunNotExecutableError,
+  CodeReviewRunNotFoundError,
+  createShellCodeReviewRunner,
+  executeCodeReviewRun,
+  formatCodeReviewFindingsForAgent,
+  markOutdatedCodeReviewRunsForSession,
+  parseReviewerOutput,
+  prepareGitReviewerWorkspace,
+  runCodexCodeReview,
+  sendCodeReviewFindingsToAgent,
+  triggerCodeReviewForSession,
+} from "./code-review-manager.js";
+export type {
+  CodeReviewRunner,
+  CodeReviewRunnerContext,
+  CodeReviewRunnerFinding,
+  CodeReviewRunnerResult,
+  CodeReviewRequestSource,
+  ExecuteCodeReviewRunInput,
+  ExecuteCodeReviewRunOptions,
+  MarkOutdatedCodeReviewRunsInput,
+  PrepareCodeReviewWorkspace,
+  SendCodeReviewFindingsInput,
+  SendCodeReviewFindingsOptions,
+  SendCodeReviewFindingsResult,
+  TriggerCodeReviewInput,
+  TriggerCodeReviewOptions,
+} from "./code-review-manager.js";
 
 // Lifecycle transitions — centralized transition boundary (#137)
 export {
@@ -110,7 +164,6 @@ export {
   isTmuxAvailable,
   listSessions as listTmuxSessions,
   hasSession as hasTmuxSession,
-  newSession as newTmuxSession,
   sendKeys as tmuxSendKeys,
   capturePane as tmuxCapturePane,
   killSession as killTmuxSession,
@@ -165,10 +218,7 @@ export {
   resetOpenCodeSessionListCache,
 } from "./opencode-shared.js";
 export type { OpenCodeSessionListEntry } from "./opencode-shared.js";
-export {
-  getWorkspaceAgentsMdPath,
-  writeWorkspaceOpenCodeAgentsMd,
-} from "./opencode-agents-md.js";
+export { getWorkspaceAgentsMdPath, writeWorkspaceOpenCodeAgentsMd } from "./opencode-agents-md.js";
 export { writeOpenCodeConfig } from "./opencode-config.js";
 export {
   getOrchestratorSessionId,
@@ -216,6 +266,43 @@ export {
 } from "./observability.js";
 export { execGhObserved, getGhTraceFilePath } from "./gh-trace.js";
 export { resolveNotifierTarget } from "./notifier-resolution.js";
+export {
+  recordNotificationDelivery,
+  sanitizeNotificationDeliveryReason,
+} from "./notification-observability.js";
+export {
+  NOTIFICATION_DATA_SCHEMA_VERSION,
+  buildCIFailureNotificationData,
+  buildNotificationSubject,
+  buildPRStateNotificationData,
+  buildReactionEscalationNotificationData,
+  buildReactionNotificationData,
+  buildSessionTransitionNotificationData,
+  getNotificationDataV3,
+  semanticTypeForReactionKey,
+} from "./notification-data.js";
+export type {
+  CIFailureNotificationInput,
+  NotificationCI,
+  NotificationCICheck,
+  NotificationDataBaseInput,
+  NotificationDataV3,
+  NotificationEscalation,
+  NotificationEventContext,
+  NotificationIssueSubject,
+  NotificationMerge,
+  NotificationPRContext,
+  NotificationPRSubject,
+  NotificationReaction,
+  NotificationReview,
+  NotificationSessionSubject,
+  NotificationSubject,
+  NotificationTransition,
+  PRStateNotificationInput,
+  ReactionEscalationNotificationInput,
+  ReactionNotificationInput,
+  SessionTransitionNotificationInput,
+} from "./notification-data.js";
 export type {
   ObservabilityLevel,
   ObservabilityMetricName,
@@ -224,6 +311,12 @@ export type {
   ProjectObserver,
 } from "./observability.js";
 export type { GhTraceContext, GhTraceEntry } from "./gh-trace.js";
+export type {
+  NotificationDeliveryFailureKind,
+  NotificationDeliveryMethod,
+  NotificationDeliveryTarget,
+  RecordNotificationDeliveryInput,
+} from "./notification-observability.js";
 
 // Feedback tools — contracts, validation, and report storage
 export {
@@ -250,6 +343,7 @@ export {
   getProjectDir,
   getProjectSessionsDir,
   getProjectWorktreesDir,
+  getProjectCodeReviewsDir,
   getProjectFeedbackReportsDir,
   getOrchestratorPath,
   getSessionPath,
@@ -273,7 +367,38 @@ export {
   validateAndStoreOrigin,
 } from "./paths.js";
 
+// Platform adapter — centralized cross-platform branching
+export {
+  isWindows,
+  isMac,
+  isLinux,
+  getDefaultRuntime,
+  getNodePtyPrebuildsSubdir,
+  getShell,
+  killProcessTree,
+  findPidByPort,
+  getEnvDefaults,
+} from "./platform.js";
+
 export { normalizeOriginUrl, relativeSubdir, deriveStorageKey } from "./storage-key.js";
+
+export {
+  DEFAULT_DASHBOARD_NOTIFICATION_LIMIT,
+  MAX_DASHBOARD_NOTIFICATION_LIMIT,
+  appendDashboardNotification,
+  appendDashboardNotificationRecord,
+  createDashboardNotificationRecord,
+  getDashboardNotificationStorePath,
+  normalizeDashboardNotificationLimit,
+  readDashboardNotifications,
+  readDashboardNotificationsFromFile,
+  writeDashboardNotificationsToFile,
+  type DashboardNotificationEventData,
+  type DashboardNotificationRecord,
+  type LegacyDashboardNotificationData,
+  type SerializedDashboardAction,
+  type SerializedDashboardEvent,
+} from "./dashboard-notifications.js";
 
 // Global config — Option C hybrid architecture (global registry + local behavior)
 export {
@@ -281,6 +406,7 @@ export {
   isCanonicalGlobalConfigPath,
   loadGlobalConfig,
   saveGlobalConfig,
+  createDefaultGlobalConfig,
   loadLocalProjectConfig,
   LocalProjectConfigSchema,
   loadLocalProjectConfigDetailed,
@@ -300,7 +426,24 @@ export type {
   LocalProjectConfig,
   LocalProjectConfigLoadResult,
   RegisterProjectOptions,
+  UpdateChannel,
+  InstallMethodOverride,
 } from "./global-config.js";
+export { UpdateChannelSchema, InstallMethodOverrideSchema } from "./global-config.js";
+
+// Channel-aware semver comparison shared by the CLI's update-check and the
+// dashboard's /api/version route.
+export { isVersionOutdated, isVersionOutdatedForChannel } from "./version-compare.js";
+
+// Cache-layer primitives for the update pipeline. Both the CLI and the
+// dashboard's /api/version route read the same cache file; centralising the
+// path + shape here prevents drift.
+export {
+  getUpdateCheckCachePath,
+  readUpdateCheckCacheRaw,
+  getInstalledAoVersion,
+} from "./update-cache.js";
+export type { UpdateCheckCacheRaw } from "./update-cache.js";
 
 export { loadEffectiveProjectConfig, iterateAllProjects } from "./project-resolver.js";
 
@@ -376,9 +519,36 @@ export type {
 
 export { atomicWriteFileSync } from "./atomic-write.js";
 
+export {
+  registerWindowsPtyHost,
+  unregisterWindowsPtyHost,
+  getWindowsPtyHosts,
+  clearWindowsPtyHostRegistry,
+  type WindowsPtyHostEntry,
+} from "./windows-pty-registry.js";
+
+export {
+  registerDaemonChild,
+  unregisterDaemonChild,
+  getDaemonChildren,
+  clearDaemonChildrenRegistry,
+  markDaemonShutdownHandlerInstalled,
+  registerChildReaper,
+  spawnManagedDaemonChild,
+  sweepDaemonChildren,
+  classifyAoOrphanCommand,
+  detectAoOrphansFromPsOutput,
+  scanAoOrphans,
+  reapAoOrphans,
+  type DaemonChildEntry,
+  type DaemonChildSweepOptions,
+  type DaemonChildSweepResult,
+  type AoOrphanProcess,
+} from "./daemon-children.js";
+
 // Activity event logging — structured diagnostic event trail
 export { recordActivityEvent, droppedEventCount } from "./activity-events.js";
-export { isActivityEventsFtsEnabled } from "./events-db.js";
+export { isActivityEventsFtsEnabled, closeDb } from "./events-db.js";
 export type {
   ActivityEventInput,
   ActivityEventKind,

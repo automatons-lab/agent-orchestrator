@@ -1,5 +1,66 @@
 # @aoagents/ao-plugin-tracker-gitlab
 
+## 0.9.1
+
+### Patch Changes
+
+- 2d4c457: Fix canary nightly to include all publishable packages and fix Next.js import.meta.url build path issue
+- Updated dependencies [2d4c457]
+  - @aoagents/ao-core@0.9.1
+  - @aoagents/ao-plugin-scm-gitlab@0.9.1
+
+## 0.9.0
+
+### Patch Changes
+
+- Updated dependencies [73bed33]
+- Updated dependencies [a610601]
+- Updated dependencies [7d9b862]
+- Updated dependencies [6d48022]
+- Updated dependencies [fcedb25]
+- Updated dependencies [94981dc]
+- Updated dependencies [2980570]
+- Updated dependencies [d5d0f07]
+  - @aoagents/ao-core@0.9.0
+  - @aoagents/ao-plugin-scm-gitlab@0.9.0
+
+## 0.8.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @aoagents/ao-core@0.8.0
+  - @aoagents/ao-plugin-scm-gitlab@0.8.0
+
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies [0f5ae0b]
+- Updated dependencies [fe33bb7]
+- Updated dependencies [7c46dc9]
+  - @aoagents/ao-core@0.7.0
+  - @aoagents/ao-plugin-scm-gitlab@0.7.0
+
+## 0.2.9
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [40aeb78]
+- Updated dependencies
+- Updated dependencies
+  - @aoagents/ao-core@0.6.0
+  - @aoagents/ao-plugin-scm-gitlab@0.2.9
+
+## 0.2.8
+
+### Patch Changes
+
+- Updated dependencies [dd07b6b]
+  - @aoagents/ao-core@0.5.0
+  - @aoagents/ao-plugin-scm-gitlab@0.2.8
+
 ## 0.2.7
 
 ### Patch Changes

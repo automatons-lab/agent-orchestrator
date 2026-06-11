@@ -57,6 +57,21 @@ export default tseslint.config(
       "no-debugger": "error",
       "no-duplicate-imports": "error",
       "no-template-curly-in-string": "warn",
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "CallExpression[callee.name='createInterface'] Property[key.name='input'] > CallExpression[callee.name='createReadStream']",
+          message:
+            "Do not pass createReadStream() inline to createInterface(); keep the stream in a variable and close/destroy it in a finally block.",
+        },
+        {
+          selector:
+            "CallExpression[callee.name='createInterface'] Property[key.name='input'] > CallExpression[callee.property.name='createReadStream']",
+          message:
+            "Do not pass createReadStream() inline to createInterface(); keep the stream in a variable and close/destroy it in a finally block.",
+        },
+      ],
       "prefer-const": "error",
       "no-var": "error",
       eqeqeq: ["error", "always"],
@@ -96,6 +111,31 @@ export default tseslint.config(
     files: ["packages/web/**/*.ts", "packages/web/**/*.tsx"],
     rules: {
       "no-console": "off",
+    },
+  },
+
+  // Long-running daemon entrypoints must use the managed-child API so any
+  // subprocess they own is registered and reaped on stop/SIGINT.
+  {
+    files: ["packages/cli/src/commands/start.ts", "packages/web/server/start-all.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "node:child_process",
+              importNames: ["spawn"],
+              message: "Use spawnManagedDaemonChild() for daemon-owned subprocesses.",
+            },
+            {
+              name: "child_process",
+              importNames: ["spawn"],
+              message: "Use spawnManagedDaemonChild() for daemon-owned subprocesses.",
+            },
+          ],
+        },
+      ],
     },
   },
 

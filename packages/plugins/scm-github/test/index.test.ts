@@ -4,7 +4,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // Mock node:child_process — gh CLI calls go through execFileAsync = promisify(execFile)
 // vi.hoisted ensures the mock fn is available when vi.mock factory runs (hoisted above imports)
 // ---------------------------------------------------------------------------
-const { ghMock } = vi.hoisted(() => ({ ghMock: vi.fn() }));
+const { ghMock, recordActivityEventMock } = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  recordActivityEventMock: vi.fn(),
+}));
 
 vi.mock("node:child_process", () => {
   // Attach the custom promisify symbol so `promisify(execFile)` returns ghMock
@@ -14,8 +17,24 @@ vi.mock("node:child_process", () => {
   return { execFile };
 });
 
-import { create, manifest } from "../src/index.js";
-import { _clearProcessCacheForTests, createActivitySignal, type PreflightContext, type PRInfo, type SCMWebhookRequest, type Session, type ProjectConfig } from "@aoagents/ao-core";
+vi.mock("@aoagents/ao-core", async () => {
+  const actual = (await vi.importActual("@aoagents/ao-core")) as Record<string, unknown>;
+  return {
+    ...actual,
+    recordActivityEvent: recordActivityEventMock,
+  };
+});
+
+import { create, manifest, _resetGitHubActivityEventDedupeForTesting } from "../src/index.js";
+import {
+  _clearProcessCacheForTests,
+  createActivitySignal,
+  type PreflightContext,
+  type PRInfo,
+  type SCMWebhookRequest,
+  type Session,
+  type ProjectConfig,
+} from "@aoagents/ao-core";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -54,6 +73,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     branch: "feat/my-feature",
     issueId: null,
     pr: null,
+    prs: [],
     workspacePath: "/tmp/repo",
     runtimeHandle: null,
     agentInfo: null,
@@ -101,6 +121,7 @@ describe("scm-github plugin", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetGitHubActivityEventDedupeForTesting();
     scm = create();
     delete process.env["GITHUB_WEBHOOK_SECRET"];
   });
@@ -483,7 +504,7 @@ describe("scm-github plugin", () => {
       ghMock.mockResolvedValueOnce({ stdout: "" });
       await scm.assignPRToCurrentUser?.(pr);
       expect(ghMock).toHaveBeenCalledWith(
-        expect.stringMatching(/(?:^|\/)?gh$/),
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
         ["pr", "edit", "42", "--repo", "acme/repo", "--add-assignee", "@me"],
         expect.any(Object),
       );
@@ -530,7 +551,7 @@ describe("scm-github plugin", () => {
       ghMock.mockResolvedValueOnce({ stdout: "" });
       await scm.mergePR(pr);
       expect(ghMock).toHaveBeenCalledWith(
-        expect.stringMatching(/(?:^|\/)?gh$/),
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
         ["pr", "merge", "42", "--repo", "acme/repo", "--squash", "--delete-branch"],
         expect.any(Object),
       );
@@ -540,7 +561,7 @@ describe("scm-github plugin", () => {
       ghMock.mockResolvedValueOnce({ stdout: "" });
       await scm.mergePR(pr, "merge");
       expect(ghMock).toHaveBeenCalledWith(
-        expect.stringMatching(/(?:^|\/)?gh$/),
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
         expect.arrayContaining(["--merge"]),
         expect.any(Object),
       );
@@ -550,7 +571,7 @@ describe("scm-github plugin", () => {
       ghMock.mockResolvedValueOnce({ stdout: "" });
       await scm.mergePR(pr, "rebase");
       expect(ghMock).toHaveBeenCalledWith(
-        expect.stringMatching(/(?:^|\/)?gh$/),
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
         expect.arrayContaining(["--rebase"]),
         expect.any(Object),
       );
@@ -564,7 +585,7 @@ describe("scm-github plugin", () => {
       ghMock.mockResolvedValueOnce({ stdout: "" });
       await scm.closePR(pr);
       expect(ghMock).toHaveBeenCalledWith(
-        expect.stringMatching(/(?:^|\/)?gh$/),
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
         ["pr", "close", "42", "--repo", "acme/repo"],
         expect.any(Object),
       );
@@ -647,6 +668,93 @@ describe("scm-github plugin", () => {
     });
   });
 
+  // ---- getCIFailureSummary -----------------------------------------------
+
+  describe("getCIFailureSummary", () => {
+    it("returns failed job step and caps the failed log tail", async () => {
+      const checks = [
+        {
+          name: "build",
+          status: "failed" as const,
+          conclusion: "FAILURE",
+          url: "https://github.com/acme/repo/actions/runs/123/job/456",
+        },
+        {
+          name: "lint",
+          status: "passed" as const,
+          conclusion: "SUCCESS",
+          url: "https://github.com/acme/repo/actions/runs/124/job/457",
+        },
+      ];
+      const logLines = Array.from({ length: 125 }, (_, index) => {
+        const step = index < 100 ? "Install dependencies" : "Run pnpm test";
+        return `build\t${step}\t2026-05-12T00:00:00Z line ${index + 1}`;
+      });
+      mockGhRaw(logLines.join("\n"));
+
+      const summary = await scm.getCIFailureSummary?.(pr, checks);
+
+      expect(summary?.failedJobs).toHaveLength(1);
+      expect(summary?.failedJobs[0]).toEqual({
+        name: "build",
+        failedStep: "Run pnpm test",
+        runUrl: "https://github.com/acme/repo/actions/runs/123/job/456",
+        logTail: logLines.slice(-120).join("\n"),
+      });
+      expect(summary?.failedJobs[0]?.logTail?.split("\n")).toHaveLength(120);
+      expect(summary?.failedJobs[0]?.logTail?.split("\n")[0]).toContain("line 6");
+      expect(summary?.failedJobs[0]?.logTail).toContain("line 125");
+      expect(ghMock).toHaveBeenLastCalledWith(
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
+        ["run", "view", "123", "--repo", "acme/repo", "--log-failed", "--job", "456"],
+        expect.any(Object),
+      );
+      expect(ghMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns null when failed-log fetch fails", async () => {
+      const checks = [
+        {
+          name: "build",
+          status: "failed" as const,
+          conclusion: "FAILURE",
+          url: "https://github.com/acme/repo/actions/runs/123/job/456",
+        },
+      ];
+      mockGhError("run view failed");
+
+      await expect(scm.getCIFailureSummary?.(pr, checks)).resolves.toBeNull();
+    });
+
+    it("falls back to job logs API when gh run view cannot read logs yet", async () => {
+      const checks = [
+        {
+          name: "lint",
+          status: "failed" as const,
+          conclusion: "FAILURE",
+          url: "https://github.com/acme/repo/actions/runs/123/job/456",
+        },
+      ];
+      mockGhError("run 123 is still in progress; logs will be available when it is complete");
+      mockGhRaw("2026-05-14T23:40:42Z ##[error]Lint failed\nunused variable");
+
+      const summary = await scm.getCIFailureSummary?.(pr, checks);
+
+      expect(summary?.failedJobs).toEqual([
+        {
+          name: "lint",
+          runUrl: "https://github.com/acme/repo/actions/runs/123/job/456",
+          logTail: "2026-05-14T23:40:42Z ##[error]Lint failed\nunused variable",
+        },
+      ]);
+      expect(ghMock).toHaveBeenLastCalledWith(
+        expect.stringMatching(/(?:^|[\\/])gh(?:\.(?:exe|cmd|bat))?$/i),
+        ["api", "repos/acme/repo/actions/jobs/456/logs"],
+        expect.any(Object),
+      );
+    });
+  });
+
   // ---- getCISummary ------------------------------------------------------
 
   describe("getCISummary", () => {
@@ -682,6 +790,34 @@ describe("scm-github plugin", () => {
     it('returns "failing" on error (fail-closed)', async () => {
       mockGhError();
       expect(await scm.getCISummary(pr)).toBe("failing");
+    });
+
+    it("dedupes fail-closed activity events per PR", async () => {
+      mockGhError("checks failed");
+      mockGhError("state failed");
+      mockGhError("checks failed again");
+      mockGhError("state failed again");
+
+      expect(await scm.getCISummary(pr)).toBe("failing");
+      expect(await scm.getCISummary(pr)).toBe("failing");
+
+      const failClosedCalls = recordActivityEventMock.mock.calls.filter(
+        ([event]) => event.kind === "scm.ci_summary_failclosed",
+      );
+      expect(failClosedCalls).toHaveLength(1);
+      expect(failClosedCalls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          source: "scm",
+          kind: "scm.ci_summary_failclosed",
+          level: "warn",
+          data: expect.objectContaining({
+            plugin: "scm-github",
+            prNumber: 42,
+            prOwner: "acme",
+            prRepo: "repo",
+          }),
+        }),
+      );
     });
 
     it('returns "none" when all checks are skipped', async () => {

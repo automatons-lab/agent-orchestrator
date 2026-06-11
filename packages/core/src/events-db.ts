@@ -24,6 +24,7 @@ type BetterSqlite3Database = {
 let _db: BetterSqlite3Database | null = null;
 let _dbFailed = false;
 let _ftsEnabled = false;
+let _dbUnavailableWarningEmitted = false;
 const PRUNE_BATCH_SIZE = 1000;
 
 function getEventsDbPath(): string {
@@ -90,14 +91,12 @@ function initFts(db: BetterSqlite3Database): void {
 }
 
 function pruneOldEvents(db: BetterSqlite3Database, cutoff: number): void {
-  db
-    .prepare(
-      `DELETE FROM activity_events
+  db.prepare(
+    `DELETE FROM activity_events
        WHERE rowid IN (
          SELECT rowid FROM activity_events WHERE ts_epoch < ? LIMIT ?
        )`,
-    )
-    .run(cutoff, PRUNE_BATCH_SIZE);
+  ).run(cutoff, PRUNE_BATCH_SIZE);
 }
 
 function openDb(): BetterSqlite3Database {
@@ -141,6 +140,63 @@ export function isActivityEventsFtsEnabled(): boolean {
 }
 
 /**
+ * Close the cached DB connection and reset module state.
+ *
+ * On Windows the SQLite handle holds an exclusive file lock; without an
+ * explicit close, callers cannot remove `activity-events.db` (or its parent
+ * directory) until the process exits. Tests that recreate the AO base dir
+ * across runs must call this before `rmSync`.
+ */
+export function closeDb(): void {
+  if (_db) {
+    try {
+      _db.close();
+    } catch {
+      // best-effort: connection may already be closed
+    }
+    _db = null;
+  }
+  _dbFailed = false;
+  _ftsEnabled = false;
+}
+
+function isAoEventsInvocation(argv = process.argv): boolean {
+  return argv.slice(2).includes("events");
+}
+
+function isMissingBetterSqlite3Binding(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("Could not locate the bindings file") ||
+    message.includes("better_sqlite3.node") ||
+    message.includes("Cannot find module 'better-sqlite3'")
+  );
+}
+
+function firstErrorLine(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0] ?? "unknown error";
+}
+
+export function formatActivityEventsDbUnavailableWarning(err: unknown): string {
+  if (isMissingBetterSqlite3Binding(err)) {
+    return `[ao] activity-events disabled: better-sqlite3 not compiled for Node ${process.version} (ABI v${process.versions.modules}). Run \`pnpm rebuild better-sqlite3\` or use a supported Node version.`;
+  }
+  return `[ao] activity-events disabled: better-sqlite3 failed to load: ${firstErrorLine(err)}`;
+}
+
+export function emitActivityEventsDbUnavailableWarning(err: unknown): void {
+  if (_dbUnavailableWarningEmitted) return;
+  if (process.env["AO_DEBUG"] !== "1" && !isAoEventsInvocation()) return;
+  _dbUnavailableWarningEmitted = true;
+  // eslint-disable-next-line no-console
+  console.warn(formatActivityEventsDbUnavailableWarning(err));
+}
+
+export function __resetActivityEventsDbWarningForTests(): void {
+  _dbUnavailableWarningEmitted = false;
+}
+
+/**
  * Get the lazily-initialized DB connection.
  * Returns null if better-sqlite3 failed to load or init — callers should treat null as no-op.
  */
@@ -152,8 +208,7 @@ export function getDb(): BetterSqlite3Database | null {
     return _db;
   } catch (err) {
     _dbFailed = true;
-    // Log once so operators know events are being dropped; subsequent calls return null silently.
-    console.warn("[ao] activity-events DB unavailable — events will be dropped:", err instanceof Error ? err.message : String(err));
+    emitActivityEventsDbUnavailableWarning(err);
     return null;
   }
 }

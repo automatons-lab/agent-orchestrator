@@ -72,6 +72,36 @@ describe("buildPrompt split output", () => {
 
     expect(taskPrompt).toBeUndefined();
   });
+
+  it("renders the orchestrator back-channel with the literal orchestrator session ID", () => {
+    const { systemPrompt } = buildPrompt({
+      project,
+      projectId: "test-app",
+      orchestratorSessionId: "test-orchestrator",
+    });
+    expect(systemPrompt).toContain("## Talking to the Orchestrator");
+    expect(systemPrompt).toContain('ao send test-orchestrator "<your message>"');
+    // No env vars or shell-syntax variants — literal ID only.
+    expect(systemPrompt).not.toContain("AO_ORCHESTRATOR_SESSION_ID");
+    expect(systemPrompt).not.toContain("$env:");
+    expect(systemPrompt).not.toContain("%AO");
+  });
+
+  it("renders the same back-channel in the no-repo prompt when orchestrator exists", () => {
+    const { systemPrompt } = buildPrompt({
+      project: { ...project, repo: undefined },
+      projectId: "test-app",
+      orchestratorSessionId: "test-orchestrator",
+    });
+    expect(systemPrompt).toContain(BASE_AGENT_PROMPT_NO_REPO);
+    expect(systemPrompt).toContain('ao send test-orchestrator "<your message>"');
+  });
+
+  it("omits the orchestrator section when no orchestratorSessionId is provided", () => {
+    const { systemPrompt } = buildPrompt({ project, projectId: "test-app" });
+    expect(systemPrompt).not.toContain("## Talking to the Orchestrator");
+    expect(systemPrompt).not.toContain("ao send");
+  });
 });
 
 describe("buildPrompt", () => {
@@ -83,7 +113,7 @@ describe("buildPrompt", () => {
     expect(taskPrompt).toBeUndefined();
   });
 
-  it("includes base prompt when issue is provided", () => {
+  it("includes base prompt when issue is provided without context", () => {
     const { systemPrompt, taskPrompt } = buildPrompt({
       project,
       projectId: "test-app",
@@ -92,7 +122,7 @@ describe("buildPrompt", () => {
     expect(systemPrompt).toContain(BASE_AGENT_PROMPT);
     expect(systemPrompt).toContain("Work on issue #INT-1343");
     expect(taskPrompt).toContain("Work on issue #INT-1343");
-    expect(taskPrompt).toContain("start implementing without re-fetching the issue");
+    expect(taskPrompt).toContain("Issue details were not pre-fetched");
   });
 
   it("includes project context", () => {
@@ -116,7 +146,7 @@ describe("buildPrompt", () => {
     expect(systemPrompt).not.toContain("Repository:");
   });
 
-  it("includes issue ID in task section", () => {
+  it("tells agent to fetch issue when context is missing", () => {
     const { systemPrompt, taskPrompt } = buildPrompt({
       project,
       projectId: "test-app",
@@ -125,10 +155,11 @@ describe("buildPrompt", () => {
     expect(systemPrompt).toContain("Work on issue #INT-1343");
     expect(systemPrompt).toContain("feat/INT-1343");
     expect(taskPrompt).toContain("Work on issue #INT-1343");
-    expect(taskPrompt).toContain("start implementing without re-fetching the issue");
+    expect(taskPrompt).toContain("Issue details were not pre-fetched");
+    expect(taskPrompt).toContain("gh issue view INT-1343");
   });
 
-  it("includes issue context when provided", () => {
+  it("tells agent details are pre-fetched when context is provided", () => {
     const { systemPrompt, taskPrompt } = buildPrompt({
       project,
       projectId: "test-app",
@@ -139,7 +170,20 @@ describe("buildPrompt", () => {
     expect(systemPrompt).toContain("Layered Prompt System");
     expect(systemPrompt).toContain("Priority: High");
     expect(taskPrompt).toContain("Work on issue #INT-1343");
+    expect(taskPrompt).toContain("start implementing without re-fetching the issue");
     expect(taskPrompt).not.toContain("Layered Prompt System");
+  });
+
+  it("normalizes issue ID with leading # to avoid double-hash", () => {
+    const { systemPrompt, taskPrompt } = buildPrompt({
+      project,
+      projectId: "test-app",
+      issueId: "#42",
+    });
+    expect(systemPrompt).toContain("Work on issue #42");
+    expect(systemPrompt).not.toContain("##42");
+    expect(taskPrompt).toContain("Work on issue #42");
+    expect(taskPrompt).not.toContain("##42");
   });
 
   it("includes inline agentRules", () => {

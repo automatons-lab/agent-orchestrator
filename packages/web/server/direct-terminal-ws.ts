@@ -17,7 +17,7 @@ export interface DirectTerminalServer {
  * Create the direct terminal WebSocket server.
  * Separated from listen() so tests can control lifecycle.
  */
-export function createDirectTerminalServer(tmuxPath?: string): DirectTerminalServer {
+export function createDirectTerminalServer(tmuxPath?: string | null): DirectTerminalServer {
   const TMUX = tmuxPath ?? findTmux();
 
   let muxWss: WebSocketServer | null = null;
@@ -61,10 +61,15 @@ export function createDirectTerminalServer(tmuxPath?: string): DirectTerminalSer
 
   // Manual upgrade routing — ws library doesn't support multiple WebSocketServer
   // instances with different `path` options on the same HTTP server.
+  // `/ao-terminal-mux` is accepted as an alias of `/mux` so deployments fronted
+  // by a path-routing reverse proxy (e.g. cloudflared, nginx) can forward the
+  // dashboard's path-based mux URL straight at this port without needing a
+  // path-rewrite rule. The dashboard's MuxProvider already constructs that
+  // path when accessed on a standard HTTPS port; see `packages/web/src/providers/MuxProvider.tsx`.
   server.on("upgrade", (request, socket, head) => {
     const pathname = new URL(request.url ?? "/", "ws://localhost").pathname;
 
-    if (pathname === "/mux" && muxWss) {
+    if ((pathname === "/mux" || pathname === "/ao-terminal-mux") && muxWss) {
       muxWss.handleUpgrade(request, socket, head, (ws) => {
         muxWss!.emit("connection", ws, request);
       });
@@ -95,11 +100,20 @@ const isMainModule =
   process.argv[1]?.endsWith("direct-terminal-ws.js");
 
 if (isMainModule) {
+  const PORT = parseInt(process.env.DIRECT_TERMINAL_PORT ?? "14801", 10);
+
+  // On Windows, findTmux() returns null — mux-websocket.ts handles this by
+  // using named pipe relay to PTY hosts instead of tmux attach.
   const TMUX = findTmux();
-  console.log(`[DirectTerminal] Using tmux: ${TMUX}`);
+  if (TMUX) {
+    console.log(`[DirectTerminal] Using tmux: ${TMUX}`);
+  } else if (process.platform === "win32") {
+    console.log(`[DirectTerminal] Windows mode — using named pipe relay to PTY hosts`);
+  } else {
+    console.log(`[DirectTerminal] No tmux available — terminal relay may be limited`);
+  }
 
   const { server, shutdown } = createDirectTerminalServer(TMUX);
-  const PORT = parseInt(process.env.DIRECT_TERMINAL_PORT ?? "14801", 10);
 
   server.listen(PORT, () => {
     console.log(`[DirectTerminal] WebSocket server listening on port ${PORT}`);

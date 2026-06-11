@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { getProjectSessionsDir, getProjectDir } from "../paths.js";
 import { resetOpenCodeSessionListCache } from "../session-manager.js";
+import { closeDb } from "../events-db.js";
 import { createInitialCanonicalLifecycle, deriveLegacyStatus } from "../lifecycle-state.js";
 import { createActivitySignal } from "../activity-signal.js";
 import type {
@@ -104,6 +105,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     branch: "feat/test",
     issueId: null,
     pr: null,
+    prs: [],
     workspacePath: "/tmp/ws",
     runtimeHandle: { id: "rt-1", runtimeName: "mock", data: {} },
     agentInfo: null,
@@ -114,6 +116,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
   return {
     ...base,
     ...overrides,
+    prs: overrides.prs ?? (overrides.pr ? [overrides.pr] : []),
     lifecycle: overrides.lifecycle ?? lifecycle,
   };
 }
@@ -300,7 +303,11 @@ export function createTestEnvironment(): TestEnvironment {
   const tmpDir = join(tmpdir(), `ao-test-lifecycle-${randomUUID()}`);
   mkdirSync(tmpDir, { recursive: true });
   const previousHome = process.env["HOME"];
+  const previousUserProfile = process.env["USERPROFILE"];
   process.env["HOME"] = tmpDir;
+  // os.homedir() on Windows reads USERPROFILE, not HOME — must override both
+  // or parallel vitest workers share the real home dir and race on storage.
+  process.env["USERPROFILE"] = tmpDir;
 
   const configPath = join(tmpDir, "agent-orchestrator.yaml");
   writeFileSync(configPath, "projects: {}\n");
@@ -345,11 +352,21 @@ export function createTestEnvironment(): TestEnvironment {
     } else {
       process.env["HOME"] = previousHome;
     }
+    if (previousUserProfile === undefined) {
+      delete process.env["USERPROFILE"];
+    } else {
+      process.env["USERPROFILE"] = previousUserProfile;
+    }
+    // V2 storage: project files live under getProjectDir(projectId).
+    // maxRetries handles Windows EBUSY (antivirus/indexer transient locks).
+    // closeDb releases the better-sqlite3 lock on activity-events.db so
+    // Windows can unlink it; without this rmSync fails with EBUSY.
+    closeDb();
     const projectDir = getProjectDir("my-app");
     if (existsSync(projectDir)) {
-      rmSync(projectDir, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
-    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   };
 
   return { tmpDir, configPath, sessionsDir, config, cleanup };
@@ -370,15 +387,19 @@ export interface TestContext {
   config: OrchestratorConfig;
   originalPath: string | undefined;
   originalHome: string | undefined;
+  originalUserProfile: string | undefined;
 }
 
 export function setupTestContext(): TestContext {
   resetOpenCodeSessionListCache();
   const originalPath = process.env.PATH;
   const originalHome = process.env["HOME"];
+  const originalUserProfile = process.env["USERPROFILE"];
   const tmpDir = join(tmpdir(), `ao-test-session-mgr-${randomUUID()}`);
   mkdirSync(tmpDir, { recursive: true });
   process.env["HOME"] = tmpDir;
+  // os.homedir() reads USERPROFILE on Windows, not HOME
+  process.env["USERPROFILE"] = tmpDir;
 
   const configPath = join(tmpDir, "agent-orchestrator.yaml");
   writeFileSync(configPath, "projects: {}\n");
@@ -436,6 +457,7 @@ export function setupTestContext(): TestContext {
     config,
     originalPath,
     originalHome,
+    originalUserProfile,
   };
 }
 
@@ -446,11 +468,20 @@ export function teardownTestContext(ctx: TestContext): void {
   } else {
     process.env["HOME"] = ctx.originalHome;
   }
+  if (ctx.originalUserProfile === undefined) {
+    delete process.env["USERPROFILE"];
+  } else {
+    process.env["USERPROFILE"] = ctx.originalUserProfile;
+  }
+  // closeDb releases the activity-events.db SQLite lock so Windows can
+  // unlink the file; rmSync's maxRetries alone doesn't break the lock.
+  closeDb();
+  // V2 storage: getProjectDir(projectId). Retry options handle Windows EBUSY.
   const projectDir = getProjectDir("my-app");
   if (existsSync(projectDir)) {
-    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
-  rmSync(ctx.tmpDir, { recursive: true, force: true });
+  rmSync(ctx.tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +497,11 @@ export function createMockSessionManager(): OpenCodeSessionManager {
         makeSession({ id: "app-orchestrator", metadata: { role: "orchestrator" } }),
       ),
     ensureOrchestrator: vi
+      .fn()
+      .mockResolvedValue(
+        makeSession({ id: "app-orchestrator", metadata: { role: "orchestrator" } }),
+      ),
+    relaunchOrchestrator: vi
       .fn()
       .mockResolvedValue(
         makeSession({ id: "app-orchestrator", metadata: { role: "orchestrator" } }),

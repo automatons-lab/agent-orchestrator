@@ -4,11 +4,17 @@
  * Replaces the dev-only `concurrently` setup.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import {
+  isWindows,
+  killProcessTree,
+  markDaemonShutdownHandlerInstalled,
+  spawnManagedDaemonChild,
+} from "@aoagents/ao-core";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -17,6 +23,7 @@ const __dirname = dirname(__filename);
 const pkgRoot = resolve(__dirname, "..");
 
 const children: ChildProcess[] = [];
+markDaemonShutdownHandlerInstalled();
 
 function log(label: string, msg: string): void {
   process.stdout.write(`[${label}] ${msg}\n`);
@@ -33,10 +40,11 @@ function spawnProcess(
   let slotIndex = -1;
 
   function launch(): ChildProcess {
-    const child = spawn(command, args, {
+    const child = spawnManagedDaemonChild(`dashboard:${label}`, command, args, {
       cwd: pkgRoot,
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
+      detached: !isWindows(),
     });
 
     child.stdout?.on("data", (data: Buffer) => {
@@ -79,10 +87,14 @@ function spawnProcess(
  * Tries the local .bin shim first (fast), then falls back to require.resolve (hoisted deps).
  */
 function resolveNextBin(): string {
-  const localBin = resolve(pkgRoot, "node_modules", ".bin", "next");
-  if (existsSync(localBin)) return localBin;
+  // On Windows, .bin/next is a POSIX shell shim that spawn() cannot execute.
+  // Skip it and go straight to the JS entry point.
+  if (!isWindows()) {
+    const localBin = resolve(pkgRoot, "node_modules", ".bin", "next");
+    if (existsSync(localBin)) return localBin;
+  }
 
-  // Hoisted node_modules — resolve the actual next CLI entry
+  // Resolve the actual Next.js CLI JS entry point
   const require = createRequire(resolve(pkgRoot, "package.json"));
   try {
     const nextPkg = require.resolve("next/package.json");
@@ -95,10 +107,38 @@ function resolveNextBin(): string {
 
 // Start Next.js production server
 const port = process.env["PORT"] || "3000";
-spawnProcess("next", resolveNextBin(), ["start", "-p", port]);
+const pathBasedMux = process.env["AO_PATH_BASED_MUX"] === "1";
+
+// When AO_PATH_BASED_MUX=1, single-port-server.js owns PORT and Next.js is
+// shifted to PORT + 1000 (overridable via NEXT_INTERNAL_PORT). The proxy
+// forwards HTTP to Next.js and tunnels `/ao-terminal-mux` WS upgrades to
+// direct-terminal-ws. Default off — Next.js stays on PORT directly.
+const NEXT_INTERNAL_OFFSET = 1000;
+const nextPort = pathBasedMux
+  ? (process.env["NEXT_INTERNAL_PORT"] ?? String(parseInt(port, 10) + NEXT_INTERNAL_OFFSET))
+  : port;
+
+const nextBin = resolveNextBin();
+
+if (isWindows() && nextBin !== "next") {
+  // On Windows, run the JS entry point via the current node binary.
+  // spawn() can't execute .js files directly on Windows.
+  spawnProcess("next", process.execPath, [nextBin, "start", "-p", nextPort]);
+} else {
+  spawnProcess("next", nextBin, ["start", "-p", nextPort]);
+}
+
+if (pathBasedMux) {
+  // Surface the internal port to the child so it doesn't have to re-derive
+  // the offset; pin it explicitly.
+  process.env["NEXT_INTERNAL_PORT"] = nextPort;
+  spawnProcess("single-port", process.execPath, [resolve(__dirname, "single-port-server.js")]);
+}
 
 // Start direct terminal WebSocket server (auto-restart on crash)
-spawnProcess("direct-terminal", "node", [resolve(__dirname, "direct-terminal-ws.js")], { restart: true });
+spawnProcess("direct-terminal", "node", [resolve(__dirname, "direct-terminal-ws.js")], {
+  restart: true,
+});
 
 // Graceful shutdown — send SIGTERM to children and wait for them to exit
 let shuttingDown = false;
@@ -128,7 +168,14 @@ function cleanup(): void {
         process.exit(0);
       }
     });
-    child.kill("SIGTERM");
+    const pid = child.pid;
+    if (pid) {
+      void killProcessTree(pid, "SIGTERM").catch(() => {
+        child.kill("SIGTERM");
+      });
+    } else {
+      child.kill("SIGTERM");
+    }
   }
 }
 

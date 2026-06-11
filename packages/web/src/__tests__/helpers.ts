@@ -205,6 +205,7 @@ export function makeSession(overrides: Partial<DashboardSession> = {}): Dashboar
     issueTitle: null,
     userPrompt: null,
     displayName: null,
+    displayNameUserSet: false,
     summary: "Test session",
     summaryIsFallback: false,
     createdAt: new Date().toISOString(),
@@ -218,6 +219,7 @@ export function makeSession(overrides: Partial<DashboardSession> = {}): Dashboar
     ...baseSession,
     ...overrides,
     issueLabel: overrides.issueLabel ?? overrides.issueId ?? baseSession.issueLabel,
+    prs: overrides.prs ?? (overrides.pr ? [overrides.pr] : []),
   } satisfies DashboardSession;
 
   return {

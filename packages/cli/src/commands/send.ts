@@ -32,7 +32,7 @@ async function resolveSessionContext(sessionName: string): Promise<{
     if (session) {
       const tmuxTarget = session.runtimeHandle?.id ?? sessionName;
       const project = config.projects[session.projectId];
-      const agentName = session.metadata["agent"] ?? project?.agent ?? config.defaults.agent;
+      const agentName = session.metadata["agent"]!;
       const runtimeName =
         session.runtimeHandle?.runtimeName ?? project?.runtime ?? config.defaults.runtime;
       return {
@@ -135,7 +135,17 @@ export function registerSend(program: Command): void {
           sessionManager,
         } = await resolveSessionContext(session);
 
-        const message = await readMessageInput(opts, messageParts);
+        const rawMessage = await readMessageInput(opts, messageParts);
+        // Auto-prefix with the sender's session ID when ao send is invoked
+        // from inside an AO session (worker → orchestrator, orchestrator →
+        // worker, worker → worker). The receiver gets the message as raw
+        // terminal input with no `from:` metadata, so the prefix is the only
+        // way to identify who's writing. Humans running ao send from their
+        // own terminal have no AO_SESSION_ID and stay unprefixed.
+        const senderSessionId = process.env["AO_SESSION_ID"];
+        const message = senderSessionId
+          ? `[from ${senderSessionId}] ${rawMessage}`
+          : rawMessage;
 
         const parsedTimeout = parseInt(opts.timeout || "600", 10);
         const timeoutMs = (isNaN(parsedTimeout) || parsedTimeout <= 0 ? 600 : parsedTimeout) * 1000;

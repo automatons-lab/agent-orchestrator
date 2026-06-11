@@ -7,6 +7,7 @@ import {
   isRetryableHttpStatus,
   normalizeRetryConfig,
   readLastJsonlEntry,
+  shellEscape,
 } from "../utils.js";
 import { parsePrFromUrl } from "../utils/pr.js";
 
@@ -115,6 +116,33 @@ describe("readLastJsonlEntry", () => {
     expect(result!.lastType).toBe("x");
     expect(result!.payloadType).toBeNull();
   });
+
+  it("extracts top-level subtype and level (Claude system-entry shape)", async () => {
+    // Real Claude writes API errors as {"type":"system","subtype":"api_error",
+    // "level":"error","cause":{...}}. Consumers (e.g. claude-code plugin's
+    // getClaudeActivityState) need both fields to classify activity correctly.
+    const path = setup(
+      '{"type":"system","subtype":"api_error","level":"error","cause":{"code":"ConnectionRefused"}}\n',
+    );
+    const result = await readLastJsonlEntry(path);
+    expect(result!.lastType).toBe("system");
+    expect(result!.lastSubtype).toBe("api_error");
+    expect(result!.lastLevel).toBe("error");
+  });
+
+  it("returns lastSubtype/lastLevel null when fields are absent", async () => {
+    const path = setup('{"type":"assistant","message":"hello"}\n');
+    const result = await readLastJsonlEntry(path);
+    expect(result!.lastSubtype).toBeNull();
+    expect(result!.lastLevel).toBeNull();
+  });
+
+  it("returns lastSubtype/lastLevel null when fields are non-string", async () => {
+    const path = setup('{"type":"x","subtype":42,"level":{"nested":true}}\n');
+    const result = await readLastJsonlEntry(path);
+    expect(result!.lastSubtype).toBeNull();
+    expect(result!.lastLevel).toBeNull();
+  });
 });
 
 describe("isGitBranchNameSafe", () => {
@@ -172,6 +200,40 @@ describe("retry utilities", () => {
       retries: 0,
       retryDelayMs: 1000,
     });
+  });
+});
+
+describe("shellEscape", () => {
+  it("wraps simple string in single quotes", () => {
+    expect(shellEscape("hello")).toBe("'hello'");
+  });
+
+  it("handles empty string", () => {
+    expect(shellEscape("")).toBe("''");
+  });
+
+  // On Windows this tests PowerShell escaping; on Unix this tests POSIX escaping
+  // Both should produce valid output for their respective shells
+  it("escapes embedded single quotes", () => {
+    const result = shellEscape("it's");
+    if (process.platform === "win32") {
+      expect(result).toBe("'it''s'");
+    } else {
+      expect(result).toBe("'it'\\''s'");
+    }
+  });
+
+  it("escapes multiple single quotes", () => {
+    const result = shellEscape("it's a 'test'");
+    if (process.platform === "win32") {
+      expect(result).toBe("'it''s a ''test'''");
+    } else {
+      expect(result).toBe("'it'\\''s a '\\''test'\\'''");
+    }
+  });
+
+  it("preserves strings without quotes unchanged", () => {
+    expect(shellEscape("claude-opus-4-5")).toBe("'claude-opus-4-5'");
   });
 });
 

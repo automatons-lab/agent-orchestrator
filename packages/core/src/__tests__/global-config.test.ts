@@ -16,6 +16,7 @@ describe("global-config storage identity", () => {
   let tempRoot: string;
   let configPath: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(() => {
     tempRoot = join(
@@ -25,12 +26,15 @@ describe("global-config storage identity", () => {
     mkdirSync(tempRoot, { recursive: true });
     configPath = join(tempRoot, "config.yaml");
     originalHome = process.env["HOME"];
+    originalUserProfile = process.env["USERPROFILE"];
     process.env["HOME"] = tempRoot;
+    process.env["USERPROFILE"] = tempRoot;
   });
 
   afterEach(() => {
     process.env["HOME"] = originalHome;
-    rmSync(tempRoot, { recursive: true, force: true });
+    process.env["USERPROFILE"] = originalUserProfile;
+    rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   function createRepo(repoName: string, originUrl?: string): string {
@@ -347,6 +351,57 @@ describe("global-config storage identity", () => {
     });
   });
 
+  it("preserves wrapped config defaults when repairing local behavior", () => {
+    const repoPath = createRepo("wrapped-local-defaults", "https://github.com/OpenAI/demo.git");
+    const projectId = registerProjectInGlobalConfig(
+      "wrapped-local-defaults",
+      "Wrapped Local Defaults",
+      repoPath,
+      { defaultBranch: "main" },
+      configPath,
+    );
+    writeFileSync(
+      join(repoPath, "agent-orchestrator.yaml"),
+      [
+        "defaults:",
+        "  agent: codex",
+        "  runtime: tmux",
+        "  workspace: worktree",
+        "  orchestrator:",
+        "    agent: codex",
+        "  worker:",
+        "    agent: opencode",
+        "projects:",
+        "  wrapped-local-defaults:",
+        `    path: ${repoPath}`,
+        "    name: Wrapped Local Defaults",
+        "",
+      ].join("\n"),
+    );
+
+    expect(resolveProjectIdentity(projectId, loadGlobalConfig(configPath)!, configPath)).toMatchObject({
+      resolveError: expect.stringContaining("wrapped projects: format"),
+    });
+
+    repairWrappedLocalProjectConfig(projectId, repoPath);
+
+    const repaired = parseYaml(readFileSync(join(repoPath, "agent-orchestrator.yaml"), "utf-8"));
+    expect(repaired).toEqual({
+      agent: "codex",
+      runtime: "tmux",
+      workspace: "worktree",
+      orchestrator: { agent: "codex" },
+      worker: { agent: "opencode" },
+    });
+    expect(resolveProjectIdentity(projectId, loadGlobalConfig(configPath)!, configPath)).toMatchObject({
+      agent: "codex",
+      runtime: "tmux",
+      workspace: "worktree",
+      orchestrator: { agent: "codex" },
+      worker: { agent: "opencode" },
+    });
+  });
+
   it("repairs wrapped local .yml configs without creating a .yaml sibling", () => {
     const repoPath = createRepo("wrapped-local-yml", "https://github.com/OpenAI/demo.git");
     const configPathYml = join(repoPath, "agent-orchestrator.yml");
@@ -486,5 +541,15 @@ describe("global-config storage identity", () => {
       runtime: "tmux",
       postCreate: ["pnpm install"],
     });
+  });
+
+  it("defaults the global runtime to the platform-appropriate value", () => {
+    // The Zod default and makeEmptyGlobalConfig() must defer to
+    // getDefaultRuntime() so Windows-loaded projects don't inherit
+    // tmux (which is intentionally unavailable on win32).
+    writeFileSync(configPath, "port: 3000\nprojects: {}\n");
+    const config = loadGlobalConfig(configPath);
+    const expected = process.platform === "win32" ? "process" : "tmux";
+    expect(config?.defaults?.runtime).toBe(expected);
   });
 });

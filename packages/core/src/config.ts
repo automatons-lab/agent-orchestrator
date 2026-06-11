@@ -25,12 +25,14 @@ import {
   type OrchestratorConfig,
 } from "./types.js";
 import { generateSessionPrefix } from "./paths.js";
+import { getDefaultRuntime } from "./platform.js";
 import {
   getGlobalConfigPath,
   isCanonicalGlobalConfigPath,
   loadGlobalConfig,
 } from "./global-config.js";
 import { loadEffectiveProjectConfig } from "./project-resolver.js";
+import { recordActivityEvent } from "./activity-events.js";
 
 function inferScmPlugin(project: {
   repo?: string;
@@ -197,6 +199,13 @@ const NotifierConfigSchema = z
   .passthrough()
   .superRefine((value, ctx) => validatePluginConfigFields(value, ctx, "Notifier"));
 
+const ObservabilityConfigSchema = z
+  .object({
+    logLevel: z.enum(["debug", "info", "warn", "error"]).default("warn"),
+    stderr: z.boolean().default(false),
+  })
+  .default({});
+
 const AgentPermissionSchema = z
   .enum(["permissionless", "default", "auto-edit", "suggest", "skip"])
   .default("permissionless")
@@ -269,6 +278,7 @@ const ProjectConfigSchema = z.object({
   runtime: z.string().optional(),
   agent: z.string().optional(),
   workspace: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
   tracker: TrackerConfigSchema.optional(),
   scm: SCMConfigSchema.optional(),
   symlinks: z.array(z.string()).optional(),
@@ -289,7 +299,7 @@ const ProjectConfigSchema = z.object({
 });
 
 const DefaultPluginsSchema = z.object({
-  runtime: z.string().default("tmux"),
+  runtime: z.string().default(() => getDefaultRuntime()),
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default([]),
@@ -374,6 +384,7 @@ const OrchestratorConfigSchema = z.object({
   readyThresholdMs: z.number().int().nonnegative().default(300_000),
   power: PowerConfigSchema,
   lifecycle: LifecycleConfigSchema,
+  observability: ObservabilityConfigSchema,
   defaults: DefaultPluginsSchema.default({}),
   plugins: z.array(InstalledPluginConfigSchema).default([]),
   dashboard: DashboardConfigSchema.optional(),
@@ -689,8 +700,6 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     "ci-failed": {
       auto: true,
       action: "send-to-agent",
-      message:
-        "CI is failing on your PR. Investigate the failures, fix the issues, and push again.",
       retries: 2,
       escalateAfter: 2,
     },
@@ -866,6 +875,7 @@ function buildEffectiveConfigFromFlatLocalPath(
     terminalPort: globalConfig.terminalPort,
     directTerminalPort: globalConfig.directTerminalPort,
     readyThresholdMs: globalConfig.readyThresholdMs,
+    observability: globalConfig.observability,
     defaults: globalConfig.defaults,
     notifiers: globalConfig.notifiers,
     notificationRouting: globalConfig.notificationRouting,
@@ -898,6 +908,17 @@ function buildEffectiveConfigFromGlobalConfigPath(configPath: string): LoadedCon
         path: entry.path,
         resolveError: error.message,
       };
+      if (error.reasonKind === "malformed" || error.reasonKind === "invalid") {
+        continue;
+      }
+      recordActivityEvent({
+        projectId,
+        source: "config",
+        kind: "config.project_resolve_failed",
+        level: "error",
+        summary: `project ${projectId} failed to resolve`,
+        data: { path: entry.path, error: error.message },
+      });
     }
   }
 
@@ -906,6 +927,7 @@ function buildEffectiveConfigFromGlobalConfigPath(configPath: string): LoadedCon
     terminalPort: globalConfig.terminalPort,
     directTerminalPort: globalConfig.directTerminalPort,
     readyThresholdMs: globalConfig.readyThresholdMs,
+    observability: globalConfig.observability,
     defaults: globalConfig.defaults,
     notifiers: globalConfig.notifiers,
     notificationRouting: globalConfig.notificationRouting,

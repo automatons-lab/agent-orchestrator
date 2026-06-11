@@ -447,6 +447,45 @@ describe("Config Schema Validation", () => {
     expect(validated.projects.proj1.sessionPrefix).toBe("test"); // "test" is 4 chars, used as-is
   });
 
+  it("accepts a string-to-string env map at the project level", () => {
+    const config = {
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+          env: {
+            GH_TOKEN: "ghp_xxx",
+            CUSTOM_FLAG: "1",
+          },
+        },
+      },
+    };
+
+    const validated = validateConfig(config);
+    expect(validated.projects.proj1.env).toEqual({
+      GH_TOKEN: "ghp_xxx",
+      CUSTOM_FLAG: "1",
+    });
+  });
+
+  it("rejects non-string values in project env map", () => {
+    const config = {
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+          env: {
+            GH_TOKEN: 123,
+          },
+        },
+      },
+    };
+
+    expect(() => validateConfig(config)).toThrow();
+  });
+
   it("accepts orchestratorModel in agentConfig", () => {
     const config = {
       projects: {
@@ -1203,6 +1242,64 @@ describe("Config Validation - Power Config", () => {
             repo: "org/test",
             defaultBranch: "main",
           },
+        },
+      }),
+    ).toThrow();
+  });
+});
+
+describe("Config Validation - Observability Config", () => {
+  const baseConfig = {
+    projects: {
+      proj1: {
+        path: "/repos/test",
+        repo: "org/test",
+        defaultBranch: "main",
+      },
+    },
+  };
+
+  it("applies default observability config", () => {
+    const config = validateConfig(baseConfig);
+
+    expect(config.observability).toEqual({
+      logLevel: "warn",
+      stderr: false,
+    });
+  });
+
+  it("accepts explicit observability settings", () => {
+    const config = validateConfig({
+      ...baseConfig,
+      observability: {
+        logLevel: "info",
+        stderr: true,
+      },
+    });
+
+    expect(config.observability).toEqual({
+      logLevel: "info",
+      stderr: true,
+    });
+  });
+
+  it("rejects invalid observability settings", () => {
+    expect(() =>
+      validateConfig({
+        ...baseConfig,
+        observability: {
+          logLevel: "verbose",
+          stderr: false,
+        },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      validateConfig({
+        ...baseConfig,
+        observability: {
+          logLevel: "warn",
+          stderr: "yes",
         },
       }),
     ).toThrow();

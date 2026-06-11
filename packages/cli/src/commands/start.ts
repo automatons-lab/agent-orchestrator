@@ -9,8 +9,8 @@
  * (or equivalent flag) at launch time — no file writing required.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve, basename, dirname } from "node:path";
 import { cwd } from "node:process";
 import chalk from "chalk";
@@ -25,7 +25,14 @@ import {
   configToYaml,
   isCanonicalGlobalConfigPath,
   isTerminalSession,
+  getDefaultRuntime,
+  isWindows,
+  isMac,
+  isLinux,
+  findPidByPort,
+  killProcessTree,
   loadLocalProjectConfigDetailed,
+  recordActivityEvent,
   registerProjectInGlobalConfig,
   getGlobalConfigPath,
   type OrchestratorConfig,
@@ -33,6 +40,12 @@ import {
   type ProjectConfig,
   type ParsedRepoUrl,
   writeLocalProjectConfig,
+  spawnManagedDaemonChild,
+  sweepDaemonChildren,
+  scanAoOrphans,
+  reapAoOrphans,
+  type DaemonChildSweepResult,
+  type AoOrphanProcess,
 } from "@aoagents/ao-core";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import { exec, execSilent, git } from "../lib/shell.js";
@@ -74,6 +87,7 @@ import {
   type DetectedAgent,
 } from "../lib/detect-agent.js";
 import { detectDefaultBranch } from "../lib/git-utils.js";
+import { dashboardUrl } from "../lib/dashboard-url.js";
 import { promptConfirm, promptSelect, promptText } from "../lib/prompts.js";
 import { extractOwnerRepo, isValidRepoString } from "../lib/repo-utils.js";
 import {
@@ -92,8 +106,10 @@ import {
   tryInstallWithAttempts,
 } from "../lib/install-helpers.js";
 import { ensureGit, runtimePreflight } from "../lib/startup-preflight.js";
-import { installShutdownHandlers } from "../lib/shutdown.js";
+import { installShutdownHandlers, isShutdownInProgress } from "../lib/shutdown.js";
 import { resolveOrCreateProject } from "../lib/resolve-project.js";
+import { pathsEqual } from "../lib/path-equality.js";
+import { maybePromptForUpdateChannel } from "../lib/update-channel-onboarding.js";
 
 import { DEFAULT_PORT } from "../lib/constants.js";
 import { projectSessionUrl } from "../lib/routes.js";
@@ -101,6 +117,17 @@ import { projectSessionUrl } from "../lib/routes.js";
 // =============================================================================
 // HELPERS
 // =============================================================================
+
+class CliFailureEventRecordedError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CliFailureEventRecordedError";
+  }
+}
+
+function isCliFailureEventRecordedError(err: unknown): boolean {
+  return err instanceof CliFailureEventRecordedError;
+}
 
 function readProjectBehaviorConfig(projectPath: string): LocalProjectConfig {
   const localConfig = loadLocalProjectConfigDetailed(projectPath);
@@ -146,6 +173,15 @@ async function registerFlatConfig(configPath: string): Promise<string | null> {
     defaultBranch,
     sessionPrefix: prefix,
     ...(repo ? { repo } : {}),
+  });
+
+  recordActivityEvent({
+    projectId: registeredProjectId,
+    source: "cli",
+    kind: "cli.config_migrated",
+    level: "info",
+    summary: `flat config registered into global config`,
+    data: { projectPath, configPath },
   });
 
   console.log(chalk.green(`  ✓ Registered "${registeredProjectId}"\n`));
@@ -199,10 +235,7 @@ async function resolveProject(
     const currentDirResolved = resolve(cwd());
     const cwdAlreadyInConfig = projectIds.some((id) => {
       try {
-        return (
-          resolve(config.projects[id].path.replace(/^~/, process.env["HOME"] || "")) ===
-          currentDirResolved
-        );
+        return pathsEqual(config.projects[id].path, currentDirResolved);
       } catch {
         return false;
       }
@@ -305,10 +338,10 @@ async function promptAgentSelection(): Promise<{
 }
 
 function ghInstallAttempts(): InstallAttempt[] {
-  if (process.platform === "darwin") {
+  if (isMac()) {
     return [{ cmd: "brew", args: ["install", "gh"], label: "brew install gh" }];
   }
-  if (process.platform === "linux") {
+  if (isLinux()) {
     return [
       {
         cmd: "sudo",
@@ -318,7 +351,7 @@ function ghInstallAttempts(): InstallAttempt[] {
       { cmd: "sudo", args: ["dnf", "install", "-y", "gh"], label: "sudo dnf install -y gh" },
     ];
   }
-  if (process.platform === "win32") {
+  if (isWindows()) {
     return [
       {
         cmd: "winget",
@@ -533,29 +566,11 @@ export async function autoCreateConfig(workingDir: string): Promise<Orchestrator
   const agent = await detectAgentRuntime(detectedAgents);
   console.log(chalk.green(`  ✓ Agent runtime: ${agent}`));
 
-  const port = await findFreePort(DEFAULT_PORT);
-  if (port !== null && port !== DEFAULT_PORT) {
-    console.log(chalk.yellow(`  ⚠ Port ${DEFAULT_PORT} is busy — using ${port} instead.`));
-  }
-
-  const config: Record<string, unknown> = {
-    port: port ?? DEFAULT_PORT,
-    defaults: {
-      runtime: "tmux",
-      agent,
-      workspace: "worktree",
-      notifiers: [],
-    },
-    projects: {
-      [projectId]: {
-        name: projectId,
-        sessionPrefix: generateSessionPrefix(projectId),
-        ...(repo ? { repo } : {}),
-        path,
-        defaultBranch,
-        ...(agentRules ? { agentRules } : {}),
-      },
-    },
+  const localConfig: LocalProjectConfig = {
+    runtime: getDefaultRuntime(),
+    agent,
+    workspace: "worktree",
+    ...(agentRules ? { agentRules } : {}),
   };
 
   const outputPath = resolve(workingDir, "agent-orchestrator.yaml");
@@ -564,8 +579,20 @@ export async function autoCreateConfig(workingDir: string): Promise<Orchestrator
     console.log(chalk.dim("  Use 'ao start' to start with the existing config.\n"));
     return loadConfig(outputPath);
   }
-  const yamlContent = configToYaml(config);
-  writeFileSync(outputPath, yamlContent);
+  writeLocalProjectConfig(workingDir, localConfig, outputPath);
+
+  try {
+    const registeredProjectId = registerProjectInGlobalConfig(projectId, projectId, path, {
+      ...(repo ? { repo } : {}),
+      defaultBranch,
+      sessionPrefix: generateSessionPrefix(projectId),
+    });
+
+    console.log(chalk.green(`✓ Registered "${registeredProjectId}" in global config\n`));
+  } catch (err) {
+    rmSync(outputPath, { force: true });
+    throw err;
+  }
 
   console.log(chalk.green(`✓ Config created: ${outputPath}\n`));
 
@@ -576,7 +603,7 @@ export async function autoCreateConfig(workingDir: string): Promise<Orchestrator
     console.log(chalk.dim("  Add a 'repo' field (owner/repo) to the config to enable them.\n"));
   }
 
-  if (!env.hasTmux) {
+  if (!env.hasTmux && getDefaultRuntime() === "tmux") {
     console.log(chalk.yellow("⚠ tmux not found — will prompt to install at startup"));
   }
   if (!env.hasGh) {
@@ -616,14 +643,12 @@ async function addProjectToConfig(
   const resolvedPath = resolve(projectPath.replace(/^~/, process.env["HOME"] || ""));
 
   // Check if this path is already registered under any project name.
-  // Use realpathSync for canonical comparison (resolves symlinks, case variants).
+  // pathsEqual canonicalizes via realpathSync and lowercases on Windows so
+  // drive-letter case and 8.3-vs-long-name differences don't cause a miss.
   // Done before ensureGit so already-registered paths return early without requiring git.
-  const canonicalPath = realpathSync(resolvedPath);
   const existingByPath = Object.entries(config.projects).find(([, p]) => {
     try {
-      return (
-        realpathSync(resolve(p.path.replace(/^~/, process.env["HOME"] || ""))) === canonicalPath
-      );
+      return pathsEqual(p.path, resolvedPath);
     } catch {
       return false;
     }
@@ -787,10 +812,10 @@ async function startDashboard(
   if (useDevServer) {
     // Monorepo with --dev: use pnpm run dev (tsx watch, HMR, etc.)
     console.log(chalk.dim("  Mode: development (HMR enabled)"));
-    child = spawn("pnpm", ["run", "dev"], {
+    child = spawnManagedDaemonChild("dashboard", "pnpm", ["run", "dev"], {
       cwd: webDir,
       stdio: "inherit",
-      detached: false,
+      detached: !isWindows(),
       env,
     });
   } else {
@@ -800,10 +825,10 @@ async function startDashboard(
       console.log(chalk.dim("  Tip: use --dev for hot reload when editing dashboard UI\n"));
     }
     const startScript = resolve(webDir, "dist-server", "start-all.js");
-    child = spawn("node", [startScript], {
+    child = spawnManagedDaemonChild("dashboard", "node", [startScript], {
       cwd: webDir,
       stdio: "inherit",
-      detached: false,
+      detached: !isWindows(),
       env,
     });
   }
@@ -834,9 +859,26 @@ async function runStartup(
   config: OrchestratorConfig,
   projectId: string,
   project: ProjectConfig,
-  opts?: { dashboard?: boolean; orchestrator?: boolean; rebuild?: boolean; dev?: boolean },
+  opts?: {
+    dashboard?: boolean;
+    orchestrator?: boolean;
+    rebuild?: boolean;
+    dev?: boolean;
+    /** true = restore without prompting, false = skip restore, undefined = prompt for humans */
+    restore?: boolean;
+  },
 ): Promise<number> {
   await runtimePreflight(config);
+
+  // Ask about the auto-update channel once on first `ao start` after this
+  // feature ships. No-op on subsequent runs (idempotent — guarded by the
+  // presence of `updateChannel` in the global config).
+  await maybePromptForUpdateChannel();
+
+  // Install the parent shutdown path before spawning any managed children.
+  // This guarantees a SIGINT/SIGTERM in the middle of startup still performs
+  // the full AO cleanup instead of relying on Node's default signal exit.
+  installShutdownHandlers({ configPath: config.configPath, projectId });
 
   const shouldStartLifecycle = opts?.dashboard !== false || opts?.orchestrator !== false;
   let port = config.port ?? DEFAULT_PORT;
@@ -883,7 +925,7 @@ async function runStartup(
       config.directTerminalPort,
       opts?.dev,
     );
-    spinner.succeed(`Dashboard starting on http://localhost:${port}`);
+    spinner.succeed(`Dashboard starting on ${dashboardUrl(port)}`);
     console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
   }
 
@@ -908,10 +950,21 @@ async function runStartup(
       }
     } catch (err) {
       spinner.fail("Orchestrator setup failed");
+      recordActivityEvent({
+        projectId,
+        source: "cli",
+        kind: "cli.start_failed",
+        level: "error",
+        summary: `orchestrator setup failed`,
+        data: {
+          reason: "orchestrator_setup",
+          errorMessage: err instanceof Error ? err.message : String(err),
+        },
+      });
       if (dashboardProcess) {
         dashboardProcess.kill();
       }
-      throw new Error(
+      throw new CliFailureEventRecordedError(
         `Failed to setup orchestrator: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
       );
@@ -921,39 +974,64 @@ async function runStartup(
   if (shouldStartLifecycle) {
     try {
       spinner.start("Starting project supervisor");
-      await startProjectSupervisor();
+      await startProjectSupervisor({ configPath: config.configPath });
       spinner.succeed("Lifecycle project supervisor started");
     } catch (err) {
       spinner.fail("Project supervisor failed to start");
+      recordActivityEvent({
+        projectId,
+        source: "cli",
+        kind: "cli.start_failed",
+        level: "error",
+        summary: `project supervisor failed to start`,
+        data: {
+          reason: "supervisor_start",
+          errorMessage: err instanceof Error ? err.message : String(err),
+        },
+      });
       if (dashboardProcess) {
         dashboardProcess.kill();
       }
-      throw new Error(
+      throw new CliFailureEventRecordedError(
         `Failed to start project supervisor: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
       );
     }
   }
 
-  // Check for sessions from last `ao stop` and offer to restore them
-  if (isHumanCaller()) {
+  // Check for sessions from last `ao stop` and restore/prompt/skip based on caller intent.
+  if (opts?.restore !== false && (opts?.restore === true || isHumanCaller())) {
     try {
       const lastStop = await readLastStop();
-      if (lastStop && lastStop.sessionIds.length > 0) {
+      const totalLastStopSessions =
+        (lastStop?.sessionIds.length ?? 0) +
+        (lastStop?.otherProjects ?? []).reduce((sum, p) => sum + p.sessionIds.length, 0);
+      if (lastStop && totalLastStopSessions > 0) {
         const stoppedAgo = `stopped at ${new Date(lastStop.stoppedAt).toLocaleString()}`;
         const otherProjects = lastStop.otherProjects ?? [];
+        const restoreProjectBySessionId = new Map<string, string>();
 
         // Build flat list of all sessions to restore, grouped for display
         const allRestoreSessions: string[] = [
           ...(lastStop.projectId === projectId ? lastStop.sessionIds : []),
           ...otherProjects.flatMap((p) => p.sessionIds),
         ];
+        for (const sessionId of lastStop.sessionIds) {
+          restoreProjectBySessionId.set(sessionId, lastStop.projectId);
+        }
+        for (const otherProject of otherProjects) {
+          for (const sessionId of otherProject.sessionIds) {
+            restoreProjectBySessionId.set(sessionId, otherProject.projectId);
+          }
+        }
 
         // Display grouped by project
         const currentProjectSessions = lastStop.projectId === projectId ? lastStop.sessionIds : [];
         if (currentProjectSessions.length > 0) {
           console.log(
-            chalk.yellow(`\n  ${currentProjectSessions.length} session(s) were active before last ao stop (${stoppedAgo}):`),
+            chalk.yellow(
+              `\n  ${currentProjectSessions.length} session(s) were active before last ao stop (${stoppedAgo}):`,
+            ),
           );
           console.log(chalk.dim(`  ${currentProjectSessions.join(", ")}\n`));
         }
@@ -969,8 +1047,20 @@ async function runStartup(
         }
 
         if (allRestoreSessions.length > 0) {
-          const shouldRestore = await promptConfirm("Restore these sessions?", true);
+          const shouldRestore =
+            opts?.restore === true ? true : await promptConfirm("Restore these sessions?", true);
           if (shouldRestore) {
+            recordActivityEvent({
+              projectId,
+              source: "cli",
+              kind: "cli.restore_started",
+              level: "info",
+              summary: `restoring ${allRestoreSessions.length} session(s) from last-stop`,
+              data: {
+                sessionCount: allRestoreSessions.length,
+                stoppedAt: lastStop.stoppedAt,
+              },
+            });
             // Use global config so the session manager can see all projects
             let restoreConfig = config;
             if (otherProjects.length > 0) {
@@ -995,15 +1085,41 @@ async function runStartup(
                 restoredCount++;
               } catch (err) {
                 failedSessionIds.add(sessionId);
+                const restoreProjectId = restoreProjectBySessionId.get(sessionId) ?? projectId;
+                recordActivityEvent({
+                  projectId: restoreProjectId,
+                  sessionId,
+                  source: "cli",
+                  kind: "cli.restore_session_failed",
+                  level: "warn",
+                  summary: `failed to restore session`,
+                  data: { errorMessage: err instanceof Error ? err.message : String(err) },
+                });
                 warnings.push(
                   `  Warning: could not restore ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
                 );
               }
             }
+            recordActivityEvent({
+              projectId,
+              source: "cli",
+              kind: "cli.restore_completed",
+              level: "info",
+              summary: `restored ${restoredCount}/${allRestoreSessions.length} session(s)`,
+              data: {
+                requested: allRestoreSessions.length,
+                restored: restoredCount,
+                failed: failedSessionIds.size,
+              },
+            });
             if (restoredCount === allRestoreSessions.length) {
-              restoreSpinner.succeed(`Restored ${restoredCount}/${allRestoreSessions.length} session(s)`);
+              restoreSpinner.succeed(
+                `Restored ${restoredCount}/${allRestoreSessions.length} session(s)`,
+              );
             } else {
-              restoreSpinner.warn(`Restored ${restoredCount}/${allRestoreSessions.length} session(s)`);
+              restoreSpinner.warn(
+                `Restored ${restoredCount}/${allRestoreSessions.length} session(s)`,
+              );
             }
             for (const w of warnings) {
               console.log(chalk.yellow(w));
@@ -1015,9 +1131,7 @@ async function runStartup(
             // and the remaining sessions would never be retryable. When
             // every session restored (or was skipped), clear the file.
             if (failedSessionIds.size > 0) {
-              const remainingTarget = lastStop.sessionIds.filter((id) =>
-                failedSessionIds.has(id),
-              );
+              const remainingTarget = lastStop.sessionIds.filter((id) => failedSessionIds.has(id));
               const remainingOther = otherProjects
                 .map((p) => ({
                   projectId: p.projectId,
@@ -1050,7 +1164,15 @@ async function runStartup(
           await clearLastStop();
         }
       }
-    } catch {
+    } catch (err) {
+      recordActivityEvent({
+        projectId,
+        source: "cli",
+        kind: "cli.last_stop_read_failed",
+        level: "warn",
+        summary: `failed to read or process last-stop state during startup`,
+        data: { errorMessage: err instanceof Error ? err.message : String(err) },
+      });
       // Non-fatal: don't block startup if last-stop handling fails
     }
   }
@@ -1059,7 +1181,7 @@ async function runStartup(
   console.log(chalk.bold.green("\n✓ Startup complete\n"));
 
   if (opts?.dashboard !== false) {
-    console.log(chalk.cyan("Dashboard:"), `http://localhost:${port}`);
+    console.log(chalk.cyan("Dashboard:"), dashboardUrl(port));
   }
 
   if (shouldStartLifecycle) {
@@ -1093,32 +1215,15 @@ async function runStartup(
     openAbort = new AbortController();
     const orchestratorUrl = selectedOrchestratorId
       ? projectSessionUrl(port, projectId, selectedOrchestratorId)
-      : `http://localhost:${port}`;
+      : dashboardUrl(port);
     void waitForPortAndOpen(port, orchestratorUrl, openAbort.signal);
   }
 
   // Keep dashboard process alive if it was started
   if (dashboardProcess) {
-    // Kill the dashboard child when the parent exits for any reason
-    // (Ctrl+C, SIGTERM from `ao stop`, normal exit, etc.).
-    // We use the `exit` event instead of SIGINT/SIGTERM to avoid
-    // conflicting with the shutdown handler in registerStart that
-    // flushes lifecycle state and calls process.exit() with the
-    // correct exit code (130 for SIGINT, 0 for SIGTERM).
-    /* c8 ignore start -- exit handler only fires on process termination */
-    const killDashboardChild = (): void => {
-      try {
-        dashboardProcess?.kill("SIGTERM");
-      } catch {
-        // already dead
-      }
-    };
-    /* c8 ignore stop */
-    process.on("exit", killDashboardChild);
-
     dashboardProcess.on("exit", (code) => {
-      process.removeListener("exit", killDashboardChild);
       if (openAbort) openAbort.abort();
+      if (isShutdownInProgress()) return;
       if (code !== 0 && code !== null) {
         console.error(chalk.red(`Dashboard exited with code ${code}`));
       }
@@ -1131,7 +1236,7 @@ async function runStartup(
 
 /**
  * Stop dashboard server.
- * Uses lsof to find the process listening on the port, then kills it.
+ * Uses platform adapter to find the process listening on the port, then kills it.
  * Best effort — if it fails, just warn the user.
  */
 /** Pattern matching AO dashboard processes (production and dev mode). */
@@ -1144,28 +1249,22 @@ const DASHBOARD_CMD_PATTERN = /next-server|start-all\.js|next dev|ao-web/;
  */
 async function killDashboardOnPort(port: number): Promise<boolean> {
   try {
-    const { stdout } = await exec("lsof", ["-ti", `:${port}`]);
-    const pids = stdout
-      .trim()
-      .split("\n")
-      .filter((p) => p.length > 0);
-    if (pids.length === 0) return false;
+    const pid = await findPidByPort(port);
+    if (!pid) return false;
 
-    // Filter to only dashboard PIDs
-    const dashboardPids: string[] = [];
-    for (const pid of pids) {
+    // On Unix, verify the process is actually a dashboard before killing so
+    // unrelated co-listeners (sidecars, SO_REUSEPORT) are left untouched.
+    // findPidByPort on Windows uses netstat; we trust the port match there.
+    if (!isWindows()) {
       try {
-        const { stdout: cmdline } = await exec("ps", ["-p", pid, "-o", "args="]);
-        if (DASHBOARD_CMD_PATTERN.test(cmdline)) {
-          dashboardPids.push(pid);
-        }
+        const { stdout: cmdline } = await exec("ps", ["-p", String(pid), "-o", "args="]);
+        if (!DASHBOARD_CMD_PATTERN.test(cmdline)) return false;
       } catch {
-        // process vanished — skip
+        return false;
       }
     }
-    if (dashboardPids.length === 0) return false;
 
-    await exec("kill", dashboardPids);
+    await killProcessTree(Number(pid));
     return true;
   } catch {
     return false;
@@ -1191,6 +1290,60 @@ async function stopDashboard(port: number): Promise<void> {
   }
 
   console.log(chalk.yellow("Could not stop dashboard (may not be running)"));
+}
+
+function formatSweepSummary(result: DaemonChildSweepResult): string {
+  return `${result.terminated} graceful, ${result.forceKilled} force-killed${
+    result.failed > 0 ? `, ${result.failed} failed` : ""
+  }`;
+}
+
+async function sweepRegisteredDaemonChildren(ownerPid?: number): Promise<void> {
+  const result = await sweepDaemonChildren({ ownerPid });
+  if (result.attempted > 0) {
+    console.log(
+      chalk.dim(
+        `  Swept ${result.attempted} registered daemon child(ren): ${formatSweepSummary(result)}`,
+      ),
+    );
+  }
+}
+
+function describeAoOrphans(orphans: AoOrphanProcess[]): string {
+  return orphans
+    .map((orphan) => `${orphan.pid} (${orphan.role})`)
+    .slice(0, 8)
+    .join(", ");
+}
+
+async function maybeSweepAoOrphansOnStart(reapOrphans: boolean | undefined): Promise<void> {
+  const orphans = await scanAoOrphans();
+  if (orphans.length === 0) return;
+
+  if (!reapOrphans && isHumanCaller()) {
+    console.log(
+      chalk.yellow(
+        `\n  Found ${orphans.length} orphaned AO child process(es): ${describeAoOrphans(orphans)}`,
+      ),
+    );
+    reapOrphans = await promptConfirm("Kill orphaned AO child processes before starting?", true);
+  }
+
+  if (!reapOrphans) {
+    console.log(
+      chalk.yellow(
+        `  Found ${orphans.length} orphaned AO child process(es). Run \`ao start --reap-orphans\` to clean them up.`,
+      ),
+    );
+    return;
+  }
+
+  const result = await reapAoOrphans(orphans);
+  console.log(
+    chalk.green(
+      `  Reaped ${result.attempted} orphaned AO child process(es): ${formatSweepSummary(result)}`,
+    ),
+  );
 }
 
 /**
@@ -1243,9 +1396,7 @@ async function attachAndSpawnOrchestrator(opts: {
     console.log(chalk.dim(`  Dashboard config reloaded.`));
   } else {
     console.log(
-      chalk.yellow(
-        `  ⚠ ${notifyResult.reason}. Refresh the page if the project doesn't show up.`,
-      ),
+      chalk.yellow(`  ⚠ ${notifyResult.reason}. Refresh the page if the project doesn't show up.`),
     );
   }
 
@@ -1259,10 +1410,10 @@ async function attachAndSpawnOrchestrator(opts: {
   }
 
   if (isHumanCaller()) {
-    console.log(chalk.dim(`  Opening dashboard: http://localhost:${daemon.port}\n`));
-    openUrl(`http://localhost:${daemon.port}`);
+    console.log(chalk.dim(`  Opening dashboard: ${dashboardUrl(daemon.port)}\n`));
+    openUrl(dashboardUrl(daemon.port));
   } else {
-    console.log(`Dashboard: http://localhost:${daemon.port}`);
+    console.log(`Dashboard: ${dashboardUrl(daemon.port)}`);
   }
 }
 
@@ -1281,6 +1432,9 @@ export function registerStart(program: Command): void {
     .option("--rebuild", "Clean and rebuild dashboard before starting")
     .option("--dev", "Use Next.js dev server with hot reload (for dashboard UI development)")
     .option("--interactive", "Prompt to configure config settings")
+    .option("--reap-orphans", "Kill orphaned AO child processes before starting")
+    .option("--restore", "Restore sessions from last ao stop without prompting")
+    .option("--no-restore", "Skip restoring sessions from last ao stop")
     .action(
       async (
         projectArg?: string,
@@ -1290,8 +1444,25 @@ export function registerStart(program: Command): void {
           rebuild?: boolean;
           dev?: boolean;
           interactive?: boolean;
+          reapOrphans?: boolean;
+          restore?: boolean;
         },
       ) => {
+        recordActivityEvent({
+          source: "cli",
+          kind: "cli.start_invoked",
+          level: "info",
+          summary: "ao start invoked",
+          data: {
+            projectArg: projectArg ?? null,
+            dashboard: opts?.dashboard !== false,
+            orchestrator: opts?.orchestrator !== false,
+            rebuild: opts?.rebuild === true,
+            dev: opts?.dev === true,
+            interactive: opts?.interactive === true,
+          },
+        });
+
         let releaseStartupLock: (() => void) | undefined;
         let startupLockReleased = false;
         const unlockStartup = (): void => {
@@ -1302,6 +1473,7 @@ export function registerStart(program: Command): void {
 
         try {
           releaseStartupLock = await acquireStartupLock();
+          await maybeSweepAoOrphansOnStart(opts?.reapOrphans);
           let config: OrchestratorConfig;
           let projectId: string;
           let project: ProjectConfig;
@@ -1309,8 +1481,7 @@ export function registerStart(program: Command): void {
           // ── Already-running detection (before any config mutation) ──
           let running = await isAlreadyRunning();
           let startNewOrchestrator = false;
-          const isProjectId =
-            projectArg && !isRepoUrl(projectArg) && !isLocalPath(projectArg);
+          const isProjectId = projectArg && !isRepoUrl(projectArg) && !isLocalPath(projectArg);
           const projectArgIsUrlOrPath =
             !!projectArg && (isRepoUrl(projectArg) || isLocalPath(projectArg));
 
@@ -1327,7 +1498,7 @@ export function registerStart(program: Command): void {
               // exit. Project-id args fall through to attach+spawn so
               // automation can `ao start <id>` against a live daemon.
               console.log(`AO is already running.`);
-              console.log(`Dashboard: http://localhost:${running.port}`);
+              console.log(`Dashboard: ${dashboardUrl(running.port)}`);
               console.log(`PID: ${running.pid}`);
               console.log(`Projects: ${running.projects.join(", ")}`);
               console.log(`To restart: ao stop && ao start`);
@@ -1337,7 +1508,7 @@ export function registerStart(program: Command): void {
 
             if (isHumanCaller() && !projectArg) {
               console.log(chalk.cyan(`\nℹ AO is already running.`));
-              console.log(`  Dashboard: ${chalk.cyan(`http://localhost:${running.port}`)}`);
+              console.log(`  Dashboard: ${chalk.cyan(dashboardUrl(running.port))}`);
               console.log(`  PID: ${running.pid} | Up since: ${running.startedAt}`);
               console.log(`  Projects: ${running.projects.join(", ")}\n`);
 
@@ -1346,10 +1517,7 @@ export function registerStart(program: Command): void {
                 try {
                   const loadedCfg = loadConfig();
                   const proj = loadedCfg.projects[p];
-                  return (
-                    proj &&
-                    resolve(proj.path.replace(/^~/, process.env["HOME"] || "")) === cwdResolved
-                  );
+                  return proj !== undefined && pathsEqual(proj.path, cwdResolved);
                 } catch {
                   return false;
                 }
@@ -1387,7 +1555,7 @@ export function registerStart(program: Command): void {
               );
 
               if (choice === "open") {
-                openUrl(`http://localhost:${running.port}`);
+                openUrl(dashboardUrl(running.port));
                 unlockStartup();
                 process.exit(0);
               } else if (choice === "quit") {
@@ -1411,7 +1579,15 @@ export function registerStart(program: Command): void {
                     `\n✓ Added "${addedId}" — open the dashboard to start an orchestrator.\n`,
                   ),
                 );
-                openUrl(`http://localhost:${running.port}`);
+                const notifyResult = await attachToDaemon(running).notifyProjectChange();
+                if (!notifyResult.ok) {
+                  console.log(
+                    chalk.yellow(
+                      `  ⚠ ${notifyResult.reason}. Refresh the page if the project doesn't show up.`,
+                    ),
+                  );
+                }
+                openUrl(dashboardUrl(running.port));
                 unlockStartup();
                 process.exit(0);
               } else if (choice === "new") {
@@ -1419,6 +1595,13 @@ export function registerStart(program: Command): void {
                 // Resolve happens below; the suffix mutation runs after.
                 startNewOrchestrator = true;
               } else if (choice === "restart") {
+                recordActivityEvent({
+                  source: "cli",
+                  kind: "cli.daemon_restart",
+                  level: "info",
+                  summary: `user chose restart, killing existing daemon`,
+                  data: { existingPid: running.pid, existingPort: running.port },
+                });
                 await killExistingDaemon(running);
                 console.log(chalk.yellow("\n  Stopped existing instance. Restarting...\n"));
                 running = null;
@@ -1447,12 +1630,44 @@ export function registerStart(program: Command): void {
 
           // ── Handle "new orchestrator" choice (deferred from already-running check) ──
           if (startNewOrchestrator) {
-            const rawYaml = readFileSync(config.configPath, "utf-8");
-            const rawConfig = yamlParse(rawYaml);
+            let mutationConfigPath = config.configPath;
+            let rawYaml = readFileSync(mutationConfigPath, "utf-8");
+            let rawConfig = yamlParse(rawYaml) as Record<string, unknown> | null;
+            let projects =
+              rawConfig &&
+              typeof rawConfig === "object" &&
+              rawConfig["projects"] &&
+              typeof rawConfig["projects"] === "object"
+                ? (rawConfig["projects"] as Record<string, Record<string, unknown> | undefined>)
+                : null;
+
+            if (!projects && !isCanonicalGlobalConfigPath(mutationConfigPath)) {
+              const globalPath = getGlobalConfigPath();
+              if (existsSync(globalPath)) {
+                mutationConfigPath = globalPath;
+                rawYaml = readFileSync(mutationConfigPath, "utf-8");
+                rawConfig = yamlParse(rawYaml) as Record<string, unknown> | null;
+                projects =
+                  rawConfig &&
+                  typeof rawConfig === "object" &&
+                  rawConfig["projects"] &&
+                  typeof rawConfig["projects"] === "object"
+                    ? (rawConfig["projects"] as Record<
+                        string,
+                        Record<string, unknown> | undefined
+                      >)
+                    : null;
+              }
+            }
+
+            if (!rawConfig || !projects || !projects[projectId]) {
+              throw new Error(`Project "${projectId}" not found in a writable project registry.`);
+            }
 
             // Collect existing prefixes to avoid collisions
             const existingPrefixes = new Set(
-              Object.values(rawConfig.projects as Record<string, Record<string, unknown>>)
+              Object.values(projects)
+                .filter((p): p is Record<string, unknown> => p !== undefined)
                 .map((p) => p.sessionPrefix as string)
                 .filter(Boolean),
             );
@@ -1463,18 +1678,18 @@ export function registerStart(program: Command): void {
               const suffix = Math.random().toString(36).slice(2, 6);
               newId = `${projectId}-${suffix}`;
               newPrefix = generateSessionPrefix(newId);
-            } while (rawConfig.projects[newId] || existingPrefixes.has(newPrefix));
+            } while (projects[newId] || existingPrefixes.has(newPrefix));
 
-            rawConfig.projects[newId] = {
-              ...rawConfig.projects[projectId],
+            projects[newId] = {
+              ...projects[projectId],
               sessionPrefix: newPrefix,
             };
-            const nextYaml = isCanonicalGlobalConfigPath(config.configPath)
+            const nextYaml = isCanonicalGlobalConfigPath(mutationConfigPath)
               ? yamlStringify(rawConfig, { indent: 2 })
               : configToYaml(rawConfig as Record<string, unknown>);
-            writeFileSync(config.configPath, nextYaml);
+            writeFileSync(mutationConfigPath, nextYaml);
             console.log(chalk.green(`\n✓ New orchestrator "${newId}" added to config\n`));
-            config = loadConfig(config.configPath);
+            config = loadConfig(mutationConfigPath);
             projectId = newId;
             project = config.projects[newId];
           }
@@ -1490,9 +1705,9 @@ export function registerStart(program: Command): void {
               running.projects.includes(projectId)
             ) {
               console.log(chalk.cyan(`\nℹ AO is already running.`));
-              console.log(`  Dashboard: ${chalk.cyan(`http://localhost:${running.port}`)}`);
+              console.log(`  Dashboard: ${chalk.cyan(dashboardUrl(running.port))}`);
               console.log(`  Project "${projectId}" is already registered and running.\n`);
-              openUrl(`http://localhost:${running.port}`);
+              openUrl(dashboardUrl(running.port));
               unlockStartup();
               process.exit(0);
             }
@@ -1515,6 +1730,7 @@ export function registerStart(program: Command): void {
           const agentOverride = opts?.interactive ? await promptAgentSelection() : null;
           if (agentOverride) {
             const { orchestratorAgent, workerAgent } = agentOverride;
+            let updatedProject: ProjectConfig | null = null;
 
             if (isCanonicalGlobalConfigPath(config.configPath)) {
               const nextLocalConfig = readProjectBehaviorConfig(project.path);
@@ -1530,15 +1746,70 @@ export function registerStart(program: Command): void {
               console.log(chalk.dim(`  ✓ Saved to ${project.path}/agent-orchestrator.yaml\n`));
             } else {
               const rawYaml = readFileSync(config.configPath, "utf-8");
-              const rawConfig = yamlParse(rawYaml);
-              const proj = rawConfig.projects[projectId];
-              proj.orchestrator = { ...(proj.orchestrator ?? {}), agent: orchestratorAgent };
-              proj.worker = { ...(proj.worker ?? {}), agent: workerAgent };
-              writeFileSync(config.configPath, configToYaml(rawConfig as Record<string, unknown>));
+              const rawConfig = yamlParse(rawYaml) as Record<string, unknown> | null;
+              const projects =
+                rawConfig &&
+                typeof rawConfig === "object" &&
+                rawConfig["projects"] &&
+                typeof rawConfig["projects"] === "object"
+                  ? (rawConfig["projects"] as Record<string, Record<string, unknown> | undefined>)
+                  : null;
+
+              if (projects) {
+                const proj = projects[projectId];
+                if (!proj) {
+                  throw new Error(`Project "${projectId}" not found in ${config.configPath}`);
+                }
+                proj.orchestrator = {
+                  ...((proj.orchestrator as Record<string, unknown> | undefined) ?? {}),
+                  agent: orchestratorAgent,
+                };
+                proj.worker = {
+                  ...((proj.worker as Record<string, unknown> | undefined) ?? {}),
+                  agent: workerAgent,
+                };
+                writeFileSync(
+                  config.configPath,
+                  configToYaml(rawConfig as Record<string, unknown>),
+                );
+              } else {
+                const nextLocalConfig = readProjectBehaviorConfig(project.path);
+                nextLocalConfig.orchestrator = {
+                  ...(nextLocalConfig.orchestrator ?? {}),
+                  agent: orchestratorAgent,
+                };
+                nextLocalConfig.worker = {
+                  ...(nextLocalConfig.worker ?? {}),
+                  agent: workerAgent,
+                };
+                writeProjectBehaviorConfig(project.path, nextLocalConfig);
+                updatedProject = {
+                  ...project,
+                  orchestrator: {
+                    ...(project.orchestrator ?? {}),
+                    agent: orchestratorAgent,
+                  },
+                  worker: {
+                    ...(project.worker ?? {}),
+                    agent: workerAgent,
+                  },
+                };
+              }
               console.log(chalk.dim(`  ✓ Saved to ${config.configPath}\n`));
             }
-            config = loadConfig(config.configPath);
-            project = config.projects[projectId];
+            if (updatedProject) {
+              project = updatedProject;
+              config = {
+                ...config,
+                projects: {
+                  ...config.projects,
+                  [projectId]: updatedProject,
+                },
+              };
+            } else {
+              config = loadConfig(config.configPath);
+              project = config.projects[projectId];
+            }
           }
 
           const actualPort = await runStartup(config, projectId, project, opts);
@@ -1575,10 +1846,20 @@ export function registerStart(program: Command): void {
           });
 
           // Ctrl+C and `ao stop` (which sends SIGTERM) perform a full
-          // graceful shutdown: kill sessions, record last-stop state for
-          // restore, unregister, then exit. See lib/shutdown.ts.
-          installShutdownHandlers({ configPath: config.configPath, projectId });
+          // graceful shutdown via the handler installed inside runStartup().
         } catch (err) {
+          if (!isCliFailureEventRecordedError(err)) {
+            recordActivityEvent({
+              source: "cli",
+              kind: "cli.start_failed",
+              level: "error",
+              summary: `ao start action failed`,
+              data: {
+                reason: "outer",
+                errorMessage: err instanceof Error ? err.message : String(err),
+              },
+            });
+          }
           if (err instanceof Error) {
             console.error(chalk.red("\nError:"), err.message);
           } else {
@@ -1598,7 +1879,49 @@ export function registerStart(program: Command): void {
  * Paths contain / or ~ or . at the start.
  */
 function isLocalPath(arg: string): boolean {
-  return arg.startsWith("/") || arg.startsWith("~") || arg.startsWith("./") || arg.startsWith("..");
+  if (arg.startsWith("/") || arg.startsWith("~") || arg.startsWith("./") || arg.startsWith("..")) {
+    return true;
+  }
+  // Windows paths: drive-letter (C:\, D:/), UNC (\\server\share), or relative backslash paths.
+  if (/^[A-Za-z]:[\\/]/.test(arg)) return true;
+  if (arg.startsWith("\\\\") || arg.startsWith(".\\") || arg.startsWith("..\\")) return true;
+  return false;
+}
+
+/**
+ * Lazy import + invoke the runtime-process plugin's Windows pty-host sweep.
+ * Kept lazy so non-Windows users don't pay the import cost on every `ao stop`,
+ * and so the cli isn't tightly coupled to the plugin's surface.
+ *
+ * Errors are swallowed: a sweep failure must not prevent `ao stop` from killing
+ * the parent process — the user explicitly asked us to stop AO.
+ */
+async function sweepWindowsPtyHostsBeforeParentKill(): Promise<void> {
+  if (!isWindows()) return;
+  try {
+    const mod = (await import("@aoagents/ao-plugin-runtime-process")) as {
+      sweepWindowsPtyHosts?: () => Promise<{
+        attempted: number;
+        gracefullyExited: number;
+        forceKilled: number;
+        failed: number;
+      }>;
+    };
+    if (typeof mod.sweepWindowsPtyHosts !== "function") return;
+    const result = await mod.sweepWindowsPtyHosts();
+    if (result.attempted > 0) {
+      console.log(
+        chalk.dim(
+          `  Swept ${result.attempted} pty-host(s): ` +
+            `${result.gracefullyExited} graceful, ` +
+            `${result.forceKilled} force-killed` +
+            (result.failed > 0 ? `, ${result.failed} failed` : ""),
+        ),
+      );
+    }
+  } catch {
+    /* sweep is best-effort; don't block ao stop on it */
+  }
 }
 
 export function registerStop(program: Command): void {
@@ -1607,7 +1930,19 @@ export function registerStop(program: Command): void {
     .description("Stop orchestrator agent and dashboard")
     .option("--purge-session", "Delete mapped OpenCode session when stopping")
     .option("--all", "Stop all running AO instances")
-    .action(async (projectArg?: string, opts: { purgeSession?: boolean; all?: boolean } = {}) => {
+    .option("-y, --yes", "Confirm stopping active sessions without prompting")
+    .action(async (projectArg?: string, opts: { purgeSession?: boolean; all?: boolean; yes?: boolean } = {}) => {
+      recordActivityEvent({
+        source: "cli",
+        kind: "cli.stop_invoked",
+        level: "info",
+        summary: "ao stop invoked",
+        data: {
+          projectArg: projectArg ?? null,
+          all: opts.all === true,
+          purgeSession: opts.purgeSession === true,
+        },
+      });
       try {
         // Check running.json first
         const running = await getRunning();
@@ -1615,11 +1950,16 @@ export function registerStop(program: Command): void {
         if (opts.all) {
           // --all: kill via running.json if available, then fallback to config
           if (running) {
-            try {
-              process.kill(running.pid, "SIGTERM");
-            } catch {
-              // Already dead
-            }
+            // Sweep detached Windows pty-hosts BEFORE killing the parent.
+            // detached:true puts them outside the parent's process tree, so
+            // taskkill /T cannot reach them. The sweep speaks the named-pipe
+            // protocol so node-pty disposes ConPTY gracefully (avoids WER
+            // 0x800700e8). No-op on non-Windows.
+            await sweepWindowsPtyHostsBeforeParentKill();
+            await sweepRegisteredDaemonChildren(running.pid);
+            // killProcessTree handles process trees on Windows (taskkill /T /F)
+            // and process groups on Unix; it swallows "already dead" internally.
+            await killProcessTree(running.pid, "SIGTERM");
             await unregister();
             console.log(chalk.green(`\n✓ Stopped AO on port ${running.port}`));
             console.log(chalk.dim(`  Projects: ${running.projects.join(", ")}\n`));
@@ -1640,10 +1980,30 @@ export function registerStop(program: Command): void {
             config = loadConfig(globalPath);
           }
         }
-        const { projectId: _projectId, project } = await resolveProject(config, projectArg, "stop");
+        let _projectId: string;
+        let project: ProjectConfig;
+        if (projectArg) {
+          ({ projectId: _projectId, project } = await resolveProject(config, projectArg, "stop"));
+        } else {
+          const projectIds = Object.keys(config.projects);
+          if (projectIds.length === 0) {
+            throw new Error("No projects configured. Add a project to agent-orchestrator.yaml.");
+          }
+          const currentDir = resolve(cwd());
+          const cwdProjectId = findProjectForDirectory(config.projects, currentDir);
+          _projectId =
+            running?.projects.find((id) => config.projects[id]) ??
+            cwdProjectId ??
+            projectIds[0];
+          project = config.projects[_projectId];
+        }
         const port = config.port ?? DEFAULT_PORT;
 
-        console.log(chalk.bold(`\nStopping orchestrator for ${chalk.cyan(project.name)}\n`));
+        if (projectArg) {
+          console.log(chalk.bold(`\nStopping orchestrator for ${chalk.cyan(project.name)}\n`));
+        } else {
+          console.log(chalk.bold(`\nStopping AO across all projects\n`));
+        }
 
         const sm = await getSessionManager(config);
         try {
@@ -1669,6 +2029,16 @@ export function registerStop(program: Command): void {
           const otherByProject = new Map<string, string[]>();
 
           if (activeSessions.length > 0) {
+            if (!projectArg && opts.yes !== true && isHumanCaller()) {
+              const confirmed = await promptConfirm(
+                `Stop AO and ${activeSessions.length} active session(s)?`,
+                false,
+              );
+              if (!confirmed) {
+                console.log(chalk.yellow("Stop cancelled."));
+                return;
+              }
+            }
             const spinner = ora(`Stopping ${activeSessions.length} active session(s)`).start();
             const purgeOpenCode = opts?.purgeSession === true;
             const warnings: string[] = [];
@@ -1679,6 +2049,15 @@ export function registerStop(program: Command): void {
                   killedSessionIds.push(session.id);
                 }
               } catch (err) {
+                recordActivityEvent({
+                  projectId: session.projectId ?? _projectId,
+                  sessionId: session.id,
+                  source: "cli",
+                  kind: "cli.stop_session_failed",
+                  level: "warn",
+                  summary: `failed to kill session during ao stop`,
+                  data: { errorMessage: err instanceof Error ? err.message : String(err) },
+                });
                 warnings.push(
                   `  Warning: failed to stop ${session.id}: ${err instanceof Error ? err.message : String(err)}`,
                 );
@@ -1687,7 +2066,9 @@ export function registerStop(program: Command): void {
             if (killedSessionIds.length === 0) {
               spinner.fail("Failed to stop any sessions");
             } else if (killedSessionIds.length < activeSessions.length) {
-              spinner.warn(`Stopped ${killedSessionIds.length}/${activeSessions.length} session(s)`);
+              spinner.warn(
+                `Stopped ${killedSessionIds.length}/${activeSessions.length} session(s)`,
+              );
             } else {
               spinner.succeed(`Stopped ${killedSessionIds.length} session(s)`);
             }
@@ -1721,14 +2102,48 @@ export function registerStop(program: Command): void {
               otherProjects.push({ projectId: pid, sessionIds: ids });
             }
 
-            await writeLastStop({
-              stoppedAt: new Date().toISOString(),
-              projectId: _projectId,
-              sessionIds: killedSessionIds.filter((id) =>
-                targetActive.some((s) => s.id === id),
-              ),
-              otherProjects: otherProjects.length > 0 ? otherProjects : undefined,
-            });
+            const targetSessionIds = killedSessionIds.filter((id) =>
+              targetActive.some((s) => s.id === id),
+            );
+            try {
+              await writeLastStop({
+                stoppedAt: new Date().toISOString(),
+                projectId: _projectId,
+                sessionIds: targetSessionIds,
+                otherProjects: otherProjects.length > 0 ? otherProjects : undefined,
+              });
+              recordActivityEvent({
+                projectId: _projectId,
+                source: "cli",
+                kind: "cli.last_stop_written",
+                level: "info",
+                summary: `last-stop state written with ${killedSessionIds.length} session(s)`,
+                data: {
+                  targetSessionCount: targetSessionIds.length,
+                  otherProjectCount: otherProjects.length,
+                  totalKilled: killedSessionIds.length,
+                },
+              });
+            } catch (err) {
+              recordActivityEvent({
+                projectId: _projectId,
+                source: "cli",
+                kind: "cli.last_stop_write_failed",
+                level: "error",
+                summary: `failed to write last-stop state during ao stop`,
+                data: {
+                  targetSessionCount: targetSessionIds.length,
+                  otherProjectCount: otherProjects.length,
+                  totalKilled: killedSessionIds.length,
+                  errorMessage: err instanceof Error ? err.message : String(err),
+                },
+              });
+              console.log(
+                chalk.yellow(
+                  `  Could not write last-stop state: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
+            }
           }
         } catch (err) {
           console.log(
@@ -1748,12 +2163,39 @@ export function registerStop(program: Command): void {
           // stops every per-project loop. No explicit stop call needed here —
           // this CLI invocation is a separate process with an empty active map.
           if (running) {
+            // Sweep detached Windows pty-hosts BEFORE killing the parent.
+            // detached:true puts them outside the parent's process tree, so
+            // taskkill /T cannot reach them. The sweep speaks the named-pipe
+            // protocol so node-pty disposes ConPTY gracefully (avoids WER
+            // 0x800700e8). No-op on non-Windows.
+            await sweepWindowsPtyHostsBeforeParentKill();
+            await sweepRegisteredDaemonChildren(running.pid);
             try {
-              process.kill(running.pid, "SIGTERM");
-            } catch {
-              // Already dead
+              await killProcessTree(running.pid, "SIGTERM");
+              recordActivityEvent({
+                projectId: _projectId,
+                source: "cli",
+                kind: "cli.daemon_killed",
+                level: "info",
+                summary: `SIGTERM sent to parent ao start`,
+                data: { pid: running.pid, port: running.port },
+              });
+            } catch (err) {
+              recordActivityEvent({
+                projectId: _projectId,
+                source: "cli",
+                kind: "cli.daemon_killed",
+                level: "warn",
+                summary: `parent ao start was already dead`,
+                data: {
+                  pid: running.pid,
+                  errorMessage: err instanceof Error ? err.message : String(err),
+                },
+              });
             }
             await unregister();
+          } else {
+            await sweepRegisteredDaemonChildren();
           }
           await stopDashboard(running?.port ?? port);
         }
@@ -1770,6 +2212,16 @@ export function registerStop(program: Command): void {
           console.log(chalk.dim(`  Projects: ${Object.keys(config.projects).join(", ")}\n`));
         }
       } catch (err) {
+        recordActivityEvent({
+          source: "cli",
+          kind: "cli.stop_failed",
+          level: "error",
+          summary: `ao stop action failed`,
+          data: {
+            projectArg: projectArg ?? null,
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+        });
         if (err instanceof Error) {
           console.error(chalk.red("\nError:"), err.message);
         } else {

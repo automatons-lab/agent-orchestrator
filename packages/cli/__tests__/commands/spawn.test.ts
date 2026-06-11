@@ -2,25 +2,28 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { type Session, type SessionManager, getProjectBaseDir } from "@aoagents/ao-core";
+import {
+  recordActivityEvent,
+  type Session,
+  type SessionManager,
+  getProjectBaseDir,
+} from "@aoagents/ao-core";
 
-const { mockExec, mockConfigRef, mockSessionManager, mockGetRunning } = vi.hoisted(
-  () => ({
-    mockExec: vi.fn(),
-    mockConfigRef: { current: null as Record<string, unknown> | null },
-    mockSessionManager: {
-      list: vi.fn(),
-      kill: vi.fn(),
-      cleanup: vi.fn(),
-      get: vi.fn(),
-      spawn: vi.fn(),
-      spawnOrchestrator: vi.fn(),
-      send: vi.fn(),
-      claimPR: vi.fn(),
-    },
-    mockGetRunning: vi.fn(),
-  }),
-);
+const { mockExec, mockConfigRef, mockSessionManager, mockGetRunning } = vi.hoisted(() => ({
+  mockExec: vi.fn(),
+  mockConfigRef: { current: null as Record<string, unknown> | null },
+  mockSessionManager: {
+    list: vi.fn(),
+    kill: vi.fn(),
+    cleanup: vi.fn(),
+    get: vi.fn(),
+    spawn: vi.fn(),
+    spawnOrchestrator: vi.fn(),
+    send: vi.fn(),
+    claimPR: vi.fn(),
+  },
+  mockGetRunning: vi.fn(),
+}));
 
 vi.mock("../../src/lib/shell.js", () => ({
   tmux: vi.fn(),
@@ -49,6 +52,7 @@ vi.mock("@aoagents/ao-core", async (importOriginal) => {
   return {
     ...actual,
     loadConfig: () => mockConfigRef.current,
+    recordActivityEvent: vi.fn(),
   };
 });
 
@@ -85,6 +89,9 @@ import { registerSpawn, registerBatchSpawn } from "../../src/commands/spawn.js";
 
 let program: Command;
 let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+const recordedEvents = (): Array<Record<string, unknown>> =>
+  vi.mocked(recordActivityEvent).mock.calls.map((c) => c[0] as Record<string, unknown>);
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "ao-spawn-test-"));
@@ -134,6 +141,7 @@ beforeEach(() => {
   mockSessionManager.claimPR.mockReset();
   mockExec.mockReset();
   mockGetRunning.mockReset();
+  vi.mocked(recordActivityEvent).mockClear();
   mockRegistryGet.mockReset().mockReturnValue(null);
   mockGetRunning.mockResolvedValue({ pid: 1234, port: 3000, startedAt: "", projects: ["my-app"] });
 });
@@ -230,6 +238,13 @@ describe("spawn command", () => {
     mkdirSync(backendSubdir, { recursive: true });
     cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(backendSubdir);
 
+    mockGetRunning.mockResolvedValue({
+      pid: 1234,
+      port: 3000,
+      startedAt: "",
+      projects: ["backend", "frontend"],
+    });
+
     const fakeSession: Session = {
       id: "be-1",
       projectId: "backend",
@@ -284,7 +299,7 @@ describe("spawn command", () => {
       pid: 1234,
       port: 3000,
       startedAt: "",
-      projects: ["agent-orchestrator"],
+      projects: ["agent-orchestrator", "x402-identity"],
     });
 
     const fakeSession: Session = {
@@ -336,7 +351,7 @@ describe("spawn command", () => {
       pid: 1234,
       port: 3000,
       startedAt: "",
-      projects: ["agent-orchestrator"],
+      projects: ["agent-orchestrator", "x402-identity"],
     });
 
     const fakeSession: Session = {
@@ -527,9 +542,7 @@ describe("spawn command", () => {
   it("reports error when spawn fails", async () => {
     mockSessionManager.spawn.mockRejectedValue(new Error("worktree creation failed"));
 
-    await expect(program.parseAsync(["node", "test", "spawn"])).rejects.toThrow(
-      "process.exit(1)",
-    );
+    await expect(program.parseAsync(["node", "test", "spawn"])).rejects.toThrow("process.exit(1)");
   });
 
   it("claims a PR for the spawned session when --claim-pr is provided", async () => {
@@ -621,14 +634,7 @@ describe("spawn command", () => {
       takenOverFrom: ["app-9"],
     });
 
-    await program.parseAsync([
-      "node",
-      "test",
-      "spawn",
-      "--claim-pr",
-      "123",
-      "--assign-on-github",
-    ]);
+    await program.parseAsync(["node", "test", "spawn", "--claim-pr", "123", "--assign-on-github"]);
 
     expect(mockSessionManager.claimPR).toHaveBeenCalledWith("app-1", "123", {
       assignOnGithub: true,
@@ -729,6 +735,19 @@ describe("spawn pre-flight checks", () => {
       .mock.calls.map((c) => String(c[0]))
       .join("\n");
     expect(errors).toContain("tmux is not installed");
+    expect(recordedEvents()).toContainEqual(
+      expect.objectContaining({
+        kind: "cli.spawn_failed",
+        source: "cli",
+        projectId: "my-app",
+        level: "error",
+        data: expect.objectContaining({
+          issueId: null,
+          agent: null,
+          errorMessage: "tmux is not installed. Install it: brew install tmux",
+        }),
+      }),
+    );
     expect(mockSessionManager.spawn).not.toHaveBeenCalled();
   });
 
@@ -853,7 +872,9 @@ describe("batch-spawn command", () => {
     return cmd;
   }
 
-  function makeFakeSession(overrides: Partial<Session> & Pick<Session, "id" | "projectId">): Session {
+  function makeFakeSession(
+    overrides: Partial<Session> & Pick<Session, "id" | "projectId">,
+  ): Session {
     return {
       status: "spawning",
       activity: null,
@@ -947,6 +968,12 @@ describe("batch-spawn command", () => {
     };
     mkdirSync(join(tmpDir, "agent-orchestrator"), { recursive: true });
     mkdirSync(join(tmpDir, "x402-identity"), { recursive: true });
+    mockGetRunning.mockResolvedValue({
+      pid: 1234,
+      port: 3000,
+      startedAt: "",
+      projects: ["agent-orchestrator", "x402-identity"],
+    });
 
     // Pre-existing active session in x402-identity for issue 20
     mockSessionManager.list.mockImplementation(async (pid: string) => {
@@ -981,5 +1008,93 @@ describe("batch-spawn command", () => {
       projectId: "agent-orchestrator",
       issueId: "10",
     });
+  });
+});
+
+describe("spawn daemon-polling enforcement", () => {
+  it("refuses to spawn when no AO daemon is running", async () => {
+    mockGetRunning.mockResolvedValue(null);
+
+    await expect(program.parseAsync(["node", "test", "spawn"])).rejects.toThrow(
+      "process.exit(1)",
+    );
+
+    const errors = vi
+      .mocked(console.error)
+      .mock.calls.map((c) => String(c[0]))
+      .join("\n");
+    expect(errors).toContain("AO is not running");
+    expect(errors).toContain("ao start");
+    expect(mockSessionManager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("refuses to spawn when the running daemon is not polling the project", async () => {
+    mockGetRunning.mockResolvedValue({
+      pid: 99999,
+      port: 3000,
+      startedAt: "",
+      projects: ["other-project"],
+    });
+
+    await expect(program.parseAsync(["node", "test", "spawn"])).rejects.toThrow(
+      "process.exit(1)",
+    );
+
+    const errors = vi
+      .mocked(console.error)
+      .mock.calls.map((c) => String(c[0]))
+      .join("\n");
+    expect(errors).toContain("not polling project");
+    expect(errors).toContain("my-app");
+    expect(errors).toContain("ao start my-app");
+    expect(mockSessionManager.spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("batch-spawn daemon-polling enforcement", () => {
+  let batchProgram: Command;
+
+  beforeEach(() => {
+    batchProgram = new Command();
+    batchProgram.exitOverride();
+    registerBatchSpawn(batchProgram);
+  });
+
+  it("refuses to batch-spawn when no AO daemon is running", async () => {
+    mockGetRunning.mockResolvedValue(null);
+
+    await expect(
+      batchProgram.parseAsync(["node", "test", "batch-spawn", "INT-1", "INT-2"]),
+    ).rejects.toThrow("process.exit(1)");
+
+    const errors = vi
+      .mocked(console.error)
+      .mock.calls.map((c) => String(c[0]))
+      .join("\n");
+    expect(errors).toContain("AO is not running");
+    expect(errors).toContain("ao start");
+    expect(mockSessionManager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("refuses to batch-spawn when the running daemon is not polling the project", async () => {
+    mockGetRunning.mockResolvedValue({
+      pid: 99999,
+      port: 3000,
+      startedAt: "",
+      projects: ["other-project"],
+    });
+
+    await expect(
+      batchProgram.parseAsync(["node", "test", "batch-spawn", "INT-1", "INT-2"]),
+    ).rejects.toThrow("process.exit(1)");
+
+    const errors = vi
+      .mocked(console.error)
+      .mock.calls.map((c) => String(c[0]))
+      .join("\n");
+    expect(errors).toContain("not polling project");
+    expect(errors).toContain("my-app");
+    expect(errors).toContain("ao start my-app");
+    expect(mockSessionManager.spawn).not.toHaveBeenCalled();
   });
 });

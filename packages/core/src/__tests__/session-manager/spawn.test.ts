@@ -13,7 +13,7 @@ import {
   readMetadata,
   readMetadataRaw,
 } from "../../metadata.js";
-import { getProjectWorktreesDir } from "../../paths.js";
+import { getProjectDir, getProjectWorktreesDir } from "../../paths.js";
 import type {
   OrchestratorConfig,
   PluginRegistry,
@@ -28,7 +28,7 @@ import {
   makeHandle,
   type TestContext,
 } from "../test-utils.js";
-import { installMockOpencode, installMockGit } from "./opencode-helpers.js";
+import { installMockOpencode, installMockGit, PATH_SEP } from "./opencode-helpers.js";
 
 let ctx: TestContext;
 let tmpDir: string;
@@ -73,7 +73,7 @@ describe("spawn", () => {
     expect(mockWorkspace.create).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "my-app",
-        worktreeDir: expect.stringContaining("projects/my-app/worktrees"),
+        worktreeDir: expect.stringMatching(/projects[\\/]my-app[\\/]worktrees/),
       }),
     );
     // Verify agent launch command was requested
@@ -101,6 +101,91 @@ describe("spawn", () => {
       if (previousTrace === undefined) delete process.env["AO_AGENT_GH_TRACE"];
       else process.env["AO_AGENT_GH_TRACE"] = previousTrace;
     }
+  });
+
+  it("forwards project.env into spawned agent runtime env", async () => {
+    const projectConfig = config.projects["my-app"];
+    if (!projectConfig) throw new Error("test setup: my-app missing");
+    const configWithEnv: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...projectConfig,
+          env: {
+            GH_TOKEN: "ghp_project_scoped",
+            CUSTOM_VAR: "hello",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({ config: configWithEnv, registry: mockRegistry });
+    await sm.spawn({ projectId: "my-app" });
+
+    expect(mockRuntime.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environment: expect.objectContaining({
+          GH_TOKEN: "ghp_project_scoped",
+          CUSTOM_VAR: "hello",
+        }),
+      }),
+    );
+  });
+
+  it("AO_* internals override project.env values with the same key", async () => {
+    const projectConfig = config.projects["my-app"];
+    if (!projectConfig) throw new Error("test setup: my-app missing");
+    const configWithEnv: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...projectConfig,
+          env: {
+            AO_SESSION: "should-not-win",
+            AO_PROJECT_ID: "should-not-win",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({ config: configWithEnv, registry: mockRegistry });
+    await sm.spawn({ projectId: "my-app" });
+
+    const call = (mockRuntime.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(call?.environment?.AO_SESSION).not.toBe("should-not-win");
+    expect(call?.environment?.AO_SESSION).toBe("app-1");
+    expect(call?.environment?.AO_PROJECT_ID).toBe("my-app");
+  });
+
+  it("PATH and GH_PATH override project.env values with the same key", async () => {
+    const projectConfig = config.projects["my-app"];
+    if (!projectConfig) throw new Error("test setup: my-app missing");
+    const configWithEnv: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...projectConfig,
+          env: {
+            PATH: "/should/not/win",
+            GH_PATH: "/should/not/win",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({ config: configWithEnv, registry: mockRegistry });
+    await sm.spawn({ projectId: "my-app" });
+
+    const call = (mockRuntime.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(call?.environment?.PATH).not.toBe("/should/not/win");
+    // Use platform-aware path so the assertion works on both POSIX and Windows
+    // (where buildAgentPath joins with backslashes via path.join).
+    expect(call?.environment?.PATH).toContain(join(".ao", "bin"));
+    expect(call?.environment?.GH_PATH).not.toBe("/should/not/win");
+    expect(call?.environment?.GH_PATH).toBe("/usr/local/bin/gh");
   });
 
   it("uses issue ID to derive branch name", async () => {
@@ -346,7 +431,7 @@ describe("spawn", () => {
 
   it("skips remote session branches when allocating a fresh session id", async () => {
     const mockGitBin = installMockGit(tmpDir, ["session/app-22"]);
-    process.env.PATH = `${mockGitBin}:${originalPath ?? ""}`;
+    process.env.PATH = `${mockGitBin}${PATH_SEP}${originalPath ?? ""}`;
     mkdirSync(config.projects["my-app"]!.path, { recursive: true });
 
     const sm = createSessionManager({ config, registry: mockRegistry });
@@ -541,7 +626,7 @@ describe("spawn", () => {
   it("deletes old issue mappings and starts fresh when opencodeIssueSessionStrategy is delete", async () => {
     const deleteLogPath = join(tmpDir, "opencode-delete-issue.log");
     const mockBin = installMockOpencode(tmpDir, "[]", deleteLogPath);
-    process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+    process.env.PATH = `${mockBin}${PATH_SEP}${originalPath ?? ""}`;
 
     const opencodeAgent: Agent = {
       ...mockAgent,
@@ -1028,6 +1113,18 @@ describe("spawn", () => {
     expect(mockRuntime.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("delivers prompt after launch for post-launch prompt agents", async () => {
+    (mockAgent as Agent & { promptDelivery: "post-launch" }).promptDelivery = "post-launch";
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    await sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
+
+    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
+      makeHandle("rt-1"),
+      expect.stringContaining("Fix the bug"),
+    );
+  });
+
   it("writes worker system prompt to file and passes only explicit task prompt to agent", async () => {
     const sm = createSessionManager({ config, registry: mockRegistry });
 
@@ -1353,6 +1450,17 @@ describe("spawn", () => {
         projectId: "my-app",
         prompt:
           "Add rate limiting to /api/upload\n\nUse a sliding-window counter keyed by IP.",
+      });
+
+      const meta = readMetadataRaw(sessionsDir, "app-1");
+      expect(meta?.["displayName"]).toBe("Add rate limiting to /api/upload");
+    });
+
+    it("strips a markdown heading marker from prompt-derived displayName", async () => {
+      const sm = createSessionManager({ config, registry: mockRegistry });
+      await sm.spawn({
+        projectId: "my-app",
+        prompt: "### Add rate limiting to /api/upload\n\nUse a sliding-window counter.",
       });
 
       const meta = readMetadataRaw(sessionsDir, "app-1");
@@ -1715,7 +1823,7 @@ describe("spawn", () => {
         ]),
         deleteLogPath,
       );
-      process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+      process.env.PATH = `${mockBin}${PATH_SEP}${originalPath ?? ""}`;
 
       const opencodeAgent: Agent = {
         ...mockAgent,
@@ -1778,7 +1886,7 @@ describe("spawn", () => {
         ]),
         deleteLogPath,
       );
-      process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+      process.env.PATH = `${mockBin}${PATH_SEP}${originalPath ?? ""}`;
 
       const opencodeAgent: Agent = {
         ...mockAgent,
@@ -1827,7 +1935,7 @@ describe("spawn", () => {
         ]),
         deleteLogPath,
       );
-      process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+      process.env.PATH = `${mockBin}${PATH_SEP}${originalPath ?? ""}`;
 
       const opencodeAgent: Agent = {
         ...mockAgent,
@@ -1879,7 +1987,7 @@ describe("spawn", () => {
         ]),
         deleteLogPath,
       );
-      process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+      process.env.PATH = `${mockBin}${PATH_SEP}${originalPath ?? ""}`;
 
       const opencodeAgent: Agent = {
         ...mockAgent,
@@ -1929,7 +2037,7 @@ describe("spawn", () => {
         ]),
         deleteLogPath,
       );
-      process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+      process.env.PATH = `${mockBin}${PATH_SEP}${originalPath ?? ""}`;
 
       const opencodeAgent: Agent = {
         ...mockAgent,
@@ -2300,6 +2408,18 @@ describe("spawn", () => {
       expect(readFileSync(promptFile, "utf-8")).toBe("You are the orchestrator.");
     });
 
+    it("delivers only a begin trigger after launch for post-launch orchestrator agents", async () => {
+      (mockAgent as Agent & { promptDelivery: "post-launch" }).promptDelivery = "post-launch";
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      await sm.spawnOrchestrator({
+        projectId: "my-app",
+        systemPrompt: "You are the orchestrator.",
+      });
+
+      expect(mockRuntime.sendMessage).toHaveBeenCalledWith(makeHandle("rt-1"), "Begin.");
+    });
+
     it("persists displayName derived from the orchestrator system prompt", async () => {
       const sm = createSessionManager({ config, registry: mockRegistry });
 
@@ -2403,5 +2523,184 @@ describe("spawn", () => {
       expect(session.runtimeHandle).toEqual(makeHandle("rt-1"));
     });
 
+  });
+
+  describe("relaunchOrchestrator", () => {
+    it("spawns a fresh orchestrator when none exists", async () => {
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      const session = await sm.relaunchOrchestrator({ projectId: "my-app" });
+
+      expect(session.id).toBe("app-orchestrator");
+      expect(session.status).toBe("working");
+      expect(mockWorkspace.create).toHaveBeenCalledTimes(1);
+      expect(mockRuntime.create).toHaveBeenCalledTimes(1);
+    });
+
+    it("kills and replaces an existing orchestrator regardless of strategy", async () => {
+      writeMetadata(sessionsDir, "app-orchestrator", {
+        role: "orchestrator",
+        project: "my-app",
+        status: "working",
+        branch: "orchestrator/app-orchestrator",
+        worktree: join(tmpDir, "old-orchestrator-ws"),
+        runtimeHandle: makeHandle("old-rt"),
+      });
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      const session = await sm.relaunchOrchestrator({ projectId: "my-app" });
+
+      expect(session.id).toBe("app-orchestrator");
+      expect(mockRuntime.destroy).toHaveBeenCalledWith(makeHandle("old-rt"));
+      expect(mockWorkspace.create).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "app-orchestrator" }),
+      );
+      const meta = readMetadataRaw(sessionsDir, "app-orchestrator");
+      expect(meta?.["status"]).toBe("working");
+      expect(meta?.["runtimeHandle"]).not.toContain("old-rt");
+    });
+
+    it("ignores project orchestratorSessionStrategy: ignore and still replaces", async () => {
+      const configWithIgnore: OrchestratorConfig = {
+        ...config,
+        projects: {
+          ...config.projects,
+          "my-app": {
+            ...config.projects["my-app"]!,
+            orchestratorSessionStrategy: "ignore",
+          },
+        },
+      };
+      writeMetadata(sessionsDir, "app-orchestrator", {
+        role: "orchestrator",
+        project: "my-app",
+        status: "working",
+        branch: "orchestrator/app-orchestrator",
+        worktree: join(tmpDir, "old-orchestrator-ws"),
+        runtimeHandle: makeHandle("old-rt"),
+      });
+      const sm = createSessionManager({ config: configWithIgnore, registry: mockRegistry });
+
+      await sm.relaunchOrchestrator({ projectId: "my-app" });
+
+      expect(mockRuntime.destroy).toHaveBeenCalledWith(makeHandle("old-rt"));
+      expect(mockWorkspace.create).toHaveBeenCalled();
+    });
+
+    it("coalesces concurrent relaunch calls into a single replacement", async () => {
+      writeMetadata(sessionsDir, "app-orchestrator", {
+        role: "orchestrator",
+        project: "my-app",
+        status: "working",
+        branch: "orchestrator/app-orchestrator",
+        worktree: join(tmpDir, "old-orchestrator-ws"),
+        runtimeHandle: makeHandle("old-rt"),
+      });
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      const [s1, s2] = await Promise.all([
+        sm.relaunchOrchestrator({ projectId: "my-app" }),
+        sm.relaunchOrchestrator({ projectId: "my-app" }),
+      ]);
+
+      expect(s1.id).toBe("app-orchestrator");
+      expect(s2.id).toBe("app-orchestrator");
+      expect(mockRuntime.destroy).toHaveBeenCalledTimes(1);
+      expect(mockWorkspace.create).toHaveBeenCalledTimes(1);
+      expect(mockRuntime.create).toHaveBeenCalledTimes(1);
+    });
+
+    it("ensureOrchestrator waits for an in-flight relaunch before returning", async () => {
+      writeMetadata(sessionsDir, "app-orchestrator", {
+        role: "orchestrator",
+        project: "my-app",
+        status: "working",
+        branch: "orchestrator/app-orchestrator",
+        worktree: join(tmpDir, "old-orchestrator-ws"),
+        runtimeHandle: makeHandle("old-rt"),
+      });
+      let releaseWorkspace: () => void = () => {};
+      const blockingWorkspace = new Promise<void>((resolve) => {
+        releaseWorkspace = resolve;
+      });
+      (mockWorkspace.create as ReturnType<typeof vi.fn>).mockImplementationOnce(async (cfg) => {
+        await blockingWorkspace;
+        return {
+          path: join(tmpDir, "ws-relaunch"),
+          branch: cfg.branch,
+          sessionId: cfg.sessionId,
+          projectId: cfg.projectId,
+        };
+      });
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      const relaunchPromise = sm.relaunchOrchestrator({ projectId: "my-app" });
+      await Promise.resolve();
+      const ensurePromise = sm.ensureOrchestrator({ projectId: "my-app" });
+
+      releaseWorkspace();
+
+      const [relaunched, ensured] = await Promise.all([relaunchPromise, ensurePromise]);
+      expect(relaunched.id).toBe("app-orchestrator");
+      expect(ensured.id).toBe("app-orchestrator");
+      // Both should resolve to the *post-relaunch* session, not the killed one.
+      expect(mockRuntime.destroy).toHaveBeenCalledWith(makeHandle("old-rt"));
+    });
+
+    it("waits for an in-flight ensureOrchestrator before replacing", async () => {
+      let releaseWorkspace: () => void = () => {};
+      const blockingWorkspace = new Promise<void>((resolve) => {
+        releaseWorkspace = resolve;
+      });
+      const ensureWorkspacePath = join(tmpDir, "ws-ensure");
+      (mockWorkspace.create as ReturnType<typeof vi.fn>).mockImplementationOnce(async (cfg) => {
+        await blockingWorkspace;
+        return {
+          path: ensureWorkspacePath,
+          branch: cfg.branch,
+          sessionId: cfg.sessionId,
+          projectId: cfg.projectId,
+        };
+      });
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      const ensurePromise = sm.ensureOrchestrator({ projectId: "my-app" });
+      // Yield so ensure can register itself in the in-flight map.
+      await Promise.resolve();
+      const relaunchPromise = sm.relaunchOrchestrator({ projectId: "my-app" });
+
+      releaseWorkspace();
+
+      const [ensured, relaunched] = await Promise.all([ensurePromise, relaunchPromise]);
+
+      expect(ensured.id).toBe("app-orchestrator");
+      expect(relaunched.id).toBe("app-orchestrator");
+      // Relaunch's kill must run, destroying the runtime ensure just spawned.
+      expect(mockRuntime.destroy).toHaveBeenCalled();
+    });
+
+    it("rewrites the orchestrator-prompt file with the new system prompt", async () => {
+      writeMetadata(sessionsDir, "app-orchestrator", {
+        role: "orchestrator",
+        project: "my-app",
+        status: "working",
+        branch: "orchestrator/app-orchestrator",
+        worktree: join(tmpDir, "old-orchestrator-ws"),
+        runtimeHandle: makeHandle("old-rt"),
+      });
+      const sm = createSessionManager({ config, registry: mockRegistry });
+
+      await sm.relaunchOrchestrator({
+        projectId: "my-app",
+        systemPrompt: "FRESH ORCHESTRATOR PROMPT",
+      });
+
+      const promptPath = join(
+        getProjectDir("my-app"),
+        "orchestrator-prompt-app-orchestrator.md",
+      );
+      expect(existsSync(promptPath)).toBe(true);
+      expect(readFileSync(promptPath, "utf-8")).toBe("FRESH ORCHESTRATOR PROMPT");
+    });
   });
 });
