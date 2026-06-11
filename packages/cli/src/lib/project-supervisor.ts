@@ -120,15 +120,6 @@ function reportProjectSupervisorError(
   });
 }
 
-async function projectHasNonTerminalSession(
-  config: OrchestratorConfig,
-  projectId: string,
-): Promise<boolean> {
-  const sm = await getSessionManager(config);
-  const sessions = await sm.list(projectId);
-  return sessions.some((session) => !isTerminalSession(session));
-}
-
 export async function reconcileProjectSupervisor(
   options: ReconcileProjectSupervisorOptions = {},
 ): Promise<void> {

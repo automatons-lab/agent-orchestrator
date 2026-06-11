@@ -88,6 +88,10 @@ describe("project-supervisor", () => {
   let sessionsByProject: Map<string, unknown[]>;
 
   beforeEach(() => {
+    // Clear AO_CONFIG_PATH so a developer machine running AO with a custom
+    // config path doesn't override the mocked config resolution (the
+    // supervisor prefers AO_CONFIG_PATH when set — fork behavior).
+    delete process.env["AO_CONFIG_PATH"];
     stopProjectSupervisor();
     activeWorkers.clear();
     sessionsByProject = new Map();

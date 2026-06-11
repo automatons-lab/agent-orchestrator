@@ -51,7 +51,10 @@ describe("portfolio-registry", () => {
     rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("reads projects from the canonical global config path instead of AO_CONFIG_PATH discovery", () => {
+  // Fork behavior: an explicit AO_CONFIG_PATH is the operator's authoritative
+  // config for non-canonical (single-file) setups and outranks the canonical
+  // global path (see projectFromGlobalConfig / project-supervisor.ts).
+  it("prefers AO_CONFIG_PATH over the canonical global config path when set", () => {
     const globalConfigPath = join(tempRoot, "global-config.yaml");
     const conflictingConfigPath = join(tempRoot, "agent-orchestrator.yaml");
     const canonicalRepo = join(tempRoot, "canonical");
@@ -87,7 +90,7 @@ describe("portfolio-registry", () => {
     );
 
     const portfolio = getPortfolio();
-    expect(portfolio.map((project) => project.id)).toEqual(["canonical"]);
+    expect(portfolio.map((project) => project.id)).toEqual(["conflicting"]);
   });
 
   it("applies preference overlays for pinning, renaming, disabling, and ordering", () => {
