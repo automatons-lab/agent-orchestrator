@@ -1,6 +1,6 @@
 {
   "name": "@aoagents/ao-plugin-notifier-desktop",
-  "version": "0.9.1",
+  "version": "0.9.3-nightly-c7a1cfdfe21cfaed2197e495d41844a92b6f8685",
   "description": "Notifier plugin: OS desktop notifications",
   "license": "MIT",
   "type": "module",
