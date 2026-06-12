@@ -159,6 +159,10 @@ const ReactionConfigSchema = z.object({
   escalateAfter: z.union([z.number(), z.string()]).optional(),
   threshold: z.string().optional(),
   includeSummary: z.boolean().optional(),
+  // z.object strips unknown keys, so every ReactionConfig field (types.ts)
+  // must be declared here or it silently vanishes from parsed YAML.
+  ignoreChecks: z.array(z.string()).optional(),
+  maxRounds: z.number().optional(),
 });
 
 const TrackerConfigSchema = z

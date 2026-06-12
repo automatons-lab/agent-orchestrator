@@ -1305,3 +1305,50 @@ describe("Config Validation - Observability Config", () => {
     ).toThrow();
   });
 });
+
+describe("Config Validation - Reaction config extras", () => {
+  // Regression: z.object strips unknown keys, so ignoreChecks/maxRounds were
+  // silently dropped from parsed YAML until declared in ReactionConfigSchema.
+  it("preserves ignoreChecks and maxRounds in global reactions", () => {
+    const config = validateConfig({
+      projects: {
+        app: { path: "/repos/app", repo: "org/app", defaultBranch: "main" },
+      },
+      reactions: {
+        "ci-failed": {
+          auto: true,
+          action: "send-to-agent",
+          ignoreChecks: ["ai-review*", "advisory-check"],
+        },
+        "changes-requested": { auto: true, action: "send-to-agent", maxRounds: 6 },
+      },
+    });
+
+    expect(config.reactions["ci-failed"]?.ignoreChecks).toEqual([
+      "ai-review*",
+      "advisory-check",
+    ]);
+    expect(config.reactions["changes-requested"]?.maxRounds).toBe(6);
+  });
+
+  it("preserves ignoreChecks and maxRounds in project-level reactions", () => {
+    const config = validateConfig({
+      projects: {
+        app: {
+          path: "/repos/app",
+          repo: "org/app",
+          defaultBranch: "main",
+          reactions: {
+            "ci-failed": { ignoreChecks: ["ai-review*"] },
+            "changes-requested": { maxRounds: 3 },
+          },
+        },
+      },
+    });
+
+    expect(config.projects["app"]?.reactions?.["ci-failed"]?.ignoreChecks).toEqual([
+      "ai-review*",
+    ]);
+    expect(config.projects["app"]?.reactions?.["changes-requested"]?.maxRounds).toBe(3);
+  });
+});
