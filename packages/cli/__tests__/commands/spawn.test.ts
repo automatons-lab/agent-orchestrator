@@ -9,21 +9,26 @@ import {
   getProjectBaseDir,
 } from "@aoagents/ao-core";
 
-const { mockExec, mockConfigRef, mockSessionManager, mockGetRunning } = vi.hoisted(() => ({
-  mockExec: vi.fn(),
-  mockConfigRef: { current: null as Record<string, unknown> | null },
-  mockSessionManager: {
-    list: vi.fn(),
-    kill: vi.fn(),
-    cleanup: vi.fn(),
-    get: vi.fn(),
-    spawn: vi.fn(),
-    spawnOrchestrator: vi.fn(),
-    send: vi.fn(),
-    claimPR: vi.fn(),
-  },
-  mockGetRunning: vi.fn(),
-}));
+const { mockExec, mockConfigRef, mockDaemonConfigByPath, mockSessionManager, mockGetRunning } =
+  vi.hoisted(() => ({
+    mockExec: vi.fn(),
+    mockConfigRef: { current: null as Record<string, unknown> | null },
+    // Per-path daemon config overrides for ensureAOPollingProject, which loads
+    // the running daemon's config (running.configPath). Unmapped paths fall
+    // back to mockConfigRef.current (the spawn command's own config view).
+    mockDaemonConfigByPath: new Map<string, Record<string, unknown>>(),
+    mockSessionManager: {
+      list: vi.fn(),
+      kill: vi.fn(),
+      cleanup: vi.fn(),
+      get: vi.fn(),
+      spawn: vi.fn(),
+      spawnOrchestrator: vi.fn(),
+      send: vi.fn(),
+      claimPR: vi.fn(),
+    },
+    mockGetRunning: vi.fn(),
+  }));
 
 vi.mock("../../src/lib/shell.js", () => ({
   tmux: vi.fn(),
@@ -51,7 +56,8 @@ vi.mock("@aoagents/ao-core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aoagents/ao-core")>();
   return {
     ...actual,
-    loadConfig: () => mockConfigRef.current,
+    loadConfig: (path?: string) =>
+      (path && mockDaemonConfigByPath.get(path)) || mockConfigRef.current,
     recordActivityEvent: vi.fn(),
   };
 });
@@ -141,6 +147,7 @@ beforeEach(() => {
   mockSessionManager.claimPR.mockReset();
   mockExec.mockReset();
   mockGetRunning.mockReset();
+  mockDaemonConfigByPath.clear();
   vi.mocked(recordActivityEvent).mockClear();
   mockRegistryGet.mockReset().mockReturnValue(null);
   mockGetRunning.mockResolvedValue({ pid: 1234, port: 3000, startedAt: "", projects: ["my-app"] });
@@ -1028,11 +1035,16 @@ describe("spawn daemon-polling enforcement", () => {
     expect(mockSessionManager.spawn).not.toHaveBeenCalled();
   });
 
-  it("refuses to spawn when the running daemon is not polling the project", async () => {
+  it("refuses to spawn when the running daemon does not supervise the project", async () => {
+    // Daemon supervises only other-project; its config has no my-app, so the
+    // supervisor will never attach a worker for the session we'd create.
+    const daemonConfigPath = "/daemon/other-only.yaml";
+    mockDaemonConfigByPath.set(daemonConfigPath, { projects: { "other-project": {} } });
     mockGetRunning.mockResolvedValue({
       pid: 99999,
       port: 3000,
       startedAt: "",
+      configPath: daemonConfigPath,
       projects: ["other-project"],
     });
 
@@ -1048,6 +1060,48 @@ describe("spawn daemon-polling enforcement", () => {
     expect(errors).toContain("my-app");
     expect(errors).toContain("ao start my-app");
     expect(mockSessionManager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("spawns for a supervised project that has no attached worker yet", async () => {
+    // External-orchestrator model: `ao start <p> --no-orchestrator` supervises
+    // my-app but, with no live sessions, my-app is absent from running.projects.
+    // The supervisor will attach a worker once this session exists, so spawn
+    // must proceed rather than hard-error.
+    const daemonConfigPath = "/daemon/multi.yaml";
+    mockDaemonConfigByPath.set(daemonConfigPath, {
+      projects: { "my-app": {}, "other-project": {} },
+    });
+    mockGetRunning.mockResolvedValue({
+      pid: 4321,
+      port: 3000,
+      startedAt: "",
+      configPath: daemonConfigPath,
+      projects: ["other-project"],
+    });
+
+    const fakeSession: Session = {
+      id: "app-9",
+      projectId: "my-app",
+      status: "spawning",
+      activity: null,
+      branch: "feat/INT-9",
+      issueId: "INT-9",
+      pr: null,
+      workspacePath: "/tmp/worktrees/app-9",
+      runtimeHandle: { id: "hash-app-9", runtimeName: "tmux", data: {} },
+      agentInfo: null,
+      createdAt: new Date(),
+      lastActivityAt: new Date(),
+      metadata: {},
+    };
+    mockSessionManager.spawn.mockResolvedValue(fakeSession);
+
+    await program.parseAsync(["node", "test", "spawn", "INT-9"]);
+
+    expect(mockSessionManager.spawn).toHaveBeenCalledWith({
+      projectId: "my-app",
+      issueId: "INT-9",
+    });
   });
 });
 
@@ -1076,11 +1130,14 @@ describe("batch-spawn daemon-polling enforcement", () => {
     expect(mockSessionManager.spawn).not.toHaveBeenCalled();
   });
 
-  it("refuses to batch-spawn when the running daemon is not polling the project", async () => {
+  it("refuses to batch-spawn when the running daemon does not supervise the project", async () => {
+    const daemonConfigPath = "/daemon/other-only.yaml";
+    mockDaemonConfigByPath.set(daemonConfigPath, { projects: { "other-project": {} } });
     mockGetRunning.mockResolvedValue({
       pid: 99999,
       port: 3000,
       startedAt: "",
+      configPath: daemonConfigPath,
       projects: ["other-project"],
     });
 

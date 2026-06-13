@@ -119,11 +119,32 @@ async function ensureAOPollingProject(projectId: string): Promise<void> {
       `AO is not running — lifecycle polling is inactive. Run \`ao start\` before spawning sessions so they get CI/review routing and state advancement.`,
     );
   }
-  if (!running.projects.includes(projectId)) {
-    throw new Error(
-      `The running AO instance (pid ${running.pid}) is not polling project "${projectId}". Run \`ao start ${projectId}\` before spawning so sessions get tracked.`,
-    );
+  // Already has an attached lifecycle worker (i.e. the project currently has
+  // live sessions) → definitely covered.
+  if (running.projects.includes(projectId)) return;
+
+  // Not attached yet. The project supervisor that `ao start` runs alongside the
+  // dashboard reconciles every configured project and attaches a lifecycle
+  // worker the moment one gains a non-terminal session — which is exactly the
+  // session we are about to create. `running.projects` only lists projects
+  // with an attached worker (a subset of the supervised set), so a
+  // supervised-but-idle project would be wrongly rejected by a membership check.
+  //
+  // This is the external-orchestrator model: `ao start <p> --no-orchestrator`
+  // boots the supervisor without an in-process orchestrator session, and
+  // workers are spawned through the MCP plugin. With no orchestrator session to
+  // keep <p> attached while idle, the project is supervised but absent from
+  // `running.projects` until the first worker exists. Only refuse when the
+  // running daemon does not supervise this project at all (true blackout).
+  try {
+    if (loadConfig(running.configPath).projects[projectId]) return;
+  } catch {
+    // Daemon config unreadable — fall through to the hard error below.
   }
+
+  throw new Error(
+    `The running AO instance (pid ${running.pid}) is not polling project "${projectId}". Run \`ao start ${projectId}\` before spawning so sessions get tracked.`,
+  );
 }
 
 /**
