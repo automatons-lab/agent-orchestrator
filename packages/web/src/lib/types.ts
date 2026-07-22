@@ -483,7 +483,14 @@ export function getAttentionLevel(
 
 function getDetailedAttentionLevel(session: DashboardSession): AttentionLevel {
   // ── Done: terminal states ─────────────────────────────────────────
-  if (isDashboardSessionDone(session)) {
+  // Use the BROAD terminal predicate (mirrors core `isTerminalSession`, the
+  // same truth `ao status` uses) rather than the narrow "done" check. A session
+  // whose runtime is gone (missing/exited) is terminal even if its sessionState
+  // is not yet done/terminated and its PR still reads mergeable — without this,
+  // a dead session with a stale "merge_ready" PR fell through to the merge check
+  // below and rendered as an active "Ready to merge" card, inconsistent with
+  // `ao status` (the reproduced #feed-gathering bug).
+  if (isDashboardSessionTerminal(session)) {
     return "done";
   }
 

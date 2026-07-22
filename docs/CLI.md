@@ -30,9 +30,20 @@ ao send <session> "Fix the tests"      # Send instructions to a running agent
 ao session ls                          # List active sessions (terminated hidden)
 ao session ls --include-terminated     # Include killed/done/merged/errored/cleanup sessions
 ao session ls --json                   # Machine-readable session inventory (see note below)
-ao session kill <session>              # Kill a session
+ao session kill <session>              # Kill a session (marks terminal, keeps metadata)
+ao session prune <session>             # Permanently remove ONE terminal session
 ao session restore <session>           # Revive a crashed agent
 ```
+
+> **`kill` vs `prune`:** `kill` marks a session terminal and tears down its
+> runtime/worktree but **keeps** its metadata so it still appears under
+> `--include-terminated` and can be `restore`d. `prune` **permanently removes**
+> one terminal session (its metadata file + any leftover workspace) so it
+> disappears from history entirely. `prune` refuses a session that is still
+> active (kill it first), preserves activity-event history and the PR/branch,
+> and never touches sessions outside AO-managed roots. Disambiguate an id shared
+> across projects with `ao session prune <project>:<session>` or
+> `--project <id>`. Use `-y/--yes` to skip the confirmation prompt.
 
 > **JSON output:** `ao session ls --json` and `ao status --json` emit
 > `{ "data": [...], "meta": { "hiddenTerminatedCount": N } }`. Terminated sessions

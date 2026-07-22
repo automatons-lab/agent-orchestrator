@@ -63,9 +63,12 @@ describe("getAttentionLevel", () => {
       expect(getAttentionLevel(session)).toBe("respond");
     });
 
-    it("returns respond when agent has exited unexpectedly (non-terminal status)", () => {
+    it("treats an exited agent as terminal (done), consistent with `ao status`", () => {
+      // A dead runtime (activity exited → runtimeState exited) is terminal per
+      // core `isTerminalSession`; it belongs in Done/Terminated, not an active
+      // attention zone.
       const session = makeSession({ status: "working", activity: "exited", pr: null });
-      expect(getAttentionLevel(session)).toBe("respond");
+      expect(getAttentionLevel(session)).toBe("done");
     });
 
     it("returns respond when status is errored even if activity is active", () => {

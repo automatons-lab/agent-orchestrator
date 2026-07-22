@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import {
+  SessionActiveError,
   SessionNotFoundError,
   SessionNotRestorableError,
   createInitialCanonicalLifecycle,
@@ -122,6 +123,17 @@ const mockSessionManager: SessionManager = {
       throw new SessionNotFoundError(id);
     }
   }),
+  reclaimLeftovers: vi.fn(async () => ({ reclaimed: true, projectId: "my-app" })),
+  prune: vi.fn(async (id: string) => {
+    const session = testSessions.find((s) => s.id === id);
+    if (!session) {
+      return { pruned: false, alreadyAbsent: true, projectId: null };
+    }
+    if (session.status === "working" && session.activity !== "exited") {
+      throw new SessionActiveError(id, session.projectId);
+    }
+    return { pruned: true, alreadyAbsent: false, projectId: session.projectId };
+  }),
   send: vi.fn(async (id: string) => {
     if (!testSessions.find((s) => s.id === id)) {
       throw new SessionNotFoundError(id);
@@ -239,6 +251,7 @@ import { POST as spawnPOST } from "@/app/api/spawn/route";
 import { POST as sendPOST } from "@/app/api/sessions/[id]/send/route";
 import { POST as messagePOST } from "@/app/api/sessions/[id]/message/route";
 import { POST as killPOST } from "@/app/api/sessions/[id]/kill/route";
+import { POST as prunePOST } from "@/app/api/sessions/[id]/prune/route";
 import { POST as restorePOST } from "@/app/api/sessions/[id]/restore/route";
 import { POST as remapPOST } from "@/app/api/sessions/[id]/remap/route";
 import { POST as mergePOST } from "@/app/api/prs/[id]/merge/route";
@@ -1354,6 +1367,50 @@ describe("API Routes", () => {
       const req = makeRequest("/api/sessions/nonexistent/kill", { method: "POST" });
       const res = await killPOST(req, { params: Promise.resolve({ id: "nonexistent" }) });
       expect(res.status).toBe(404);
+    });
+  });
+
+  // ── POST /api/sessions/:id/prune ───────────────────────────────────
+
+  describe("POST /api/sessions/:id/prune", () => {
+    it("prunes a terminal session", async () => {
+      const req = makeRequest("/api/sessions/frontend-1/prune", { method: "POST" });
+      const res = await prunePOST(req, { params: Promise.resolve({ id: "frontend-1" }) });
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.ok).toBe(true);
+      expect(data.pruned).toBe(true);
+      expect(mockSessionManager.prune).toHaveBeenCalledWith(
+        "frontend-1",
+        expect.objectContaining({ projectId: undefined }),
+      );
+    });
+
+    it("returns 409 for an active session", async () => {
+      const req = makeRequest("/api/sessions/backend-9/prune", { method: "POST" });
+      const res = await prunePOST(req, { params: Promise.resolve({ id: "backend-9" }) });
+      expect(res.status).toBe(409);
+    });
+
+    it("returns 200 alreadyAbsent for an unknown session (idempotent)", async () => {
+      const req = makeRequest("/api/sessions/nonexistent/prune", { method: "POST" });
+      const res = await prunePOST(req, { params: Promise.resolve({ id: "nonexistent" }) });
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.alreadyAbsent).toBe(true);
+    });
+
+    it("passes an explicit projectId from the body for disambiguation", async () => {
+      const req = makeRequest("/api/sessions/frontend-1/prune", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "my-app" }),
+      });
+      const res = await prunePOST(req, { params: Promise.resolve({ id: "frontend-1" }) });
+      expect(res.status).toBe(200);
+      expect(mockSessionManager.prune).toHaveBeenCalledWith(
+        "frontend-1",
+        expect.objectContaining({ projectId: "my-app" }),
+      );
     });
   });
 

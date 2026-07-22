@@ -41,6 +41,8 @@ import {
   type CICheck,
   type CIFailureSummary,
   type PRInfo,
+  type PRState,
+  type CanonicalPRReason,
   type ReviewComment,
   type ReviewSummary,
   type ProcessProbeResult,
@@ -562,6 +564,38 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   const REVIEW_BACKLOG_THROTTLE_MS = 2 * 60 * 1000;
 
   /**
+   * Per-session backoff schedule for the terminal-PR reconciler. A session that
+   * terminalized while its PR was still open is excluded from the normal poll
+   * (`sessionsToCheck`), so its PR state would otherwise never be re-read. This
+   * map spreads out the lightweight `getPRState` reads with exponential backoff
+   * so a long-lived open PR on a dead session doesn't hammer the SCM API.
+   *
+   * In-memory only — resets on restart (like `lastReviewBacklogCheckAt`). After
+   * a restart each terminal-open-PR session is re-checked once, then backs off
+   * again. That is bounded by the number of such sessions.
+   */
+  const terminalReconcileNextAt = new Map<SessionId, number>();
+  const terminalReconcileAttempts = new Map<SessionId, number>();
+  /** First backoff step (~2 poll cycles) and cap for the terminal reconciler. */
+  const TERMINAL_RECONCILE_BASE_MS = 60_000;
+  const TERMINAL_RECONCILE_MAX_MS = 30 * 60_000;
+
+  function scheduleTerminalReconcile(sessionId: SessionId): void {
+    const attempts = (terminalReconcileAttempts.get(sessionId) ?? 0) + 1;
+    terminalReconcileAttempts.set(sessionId, attempts);
+    const delay = Math.min(
+      TERMINAL_RECONCILE_BASE_MS * 2 ** (attempts - 1),
+      TERMINAL_RECONCILE_MAX_MS,
+    );
+    terminalReconcileNextAt.set(sessionId, Date.now() + delay);
+  }
+
+  function forgetTerminalReconcile(sessionId: SessionId): void {
+    terminalReconcileNextAt.delete(sessionId);
+    terminalReconcileAttempts.delete(sessionId);
+  }
+
+  /**
    * Populate the PR enrichment cache using batch GraphQL queries.
    * This is called once per poll cycle to fetch data for all PRs efficiently.
    */
@@ -912,6 +946,149 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Keep in-memory isDraft in sync with enrichment data
         if (secondaryCached.isDraft !== undefined) {
           secondaryPR.isDraft = secondaryCached.isDraft;
+        }
+      }
+    }
+  }
+
+  /**
+   * SCM-only reconciliation for sessions that terminalized while a tracked PR
+   * was still open. These are excluded from the normal poll (`sessionsToCheck`),
+   * so their PR state would otherwise never be re-read — an external merge/close
+   * would never be observed, leaving stale "Ready/mergeable" enrichment in the
+   * dashboard and skipping merge cleanup (the reproduced #feed-gathering bug).
+   *
+   * This pass performs ONLY lightweight `getPRState` reads (with per-session
+   * exponential backoff) and, when every tracked PR is observed merged/closed,
+   * persists the canonical PR truth atomically and hands off to
+   * `sessionManager.reclaimLeftovers` for idempotent teardown. It never
+   * restores, restarts, or messages the worker, and never runs live-worker
+   * reactions.
+   */
+  async function reconcileTerminalSessionPRs(
+    sessions: Session[],
+    excludeIds: Set<SessionId>,
+  ): Promise<void> {
+    const now = Date.now();
+    const cohort = sessions.filter(
+      (s) =>
+        !excludeIds.has(s.id) &&
+        TERMINAL_STATUSES.has(s.status) &&
+        s.lifecycle.pr.state === "open" &&
+        !!s.lifecycle.pr.url,
+    );
+
+    for (const session of cohort) {
+      // Respect per-session backoff so a long-lived open PR on a dead session
+      // doesn't hammer the SCM API.
+      const nextAt = terminalReconcileNextAt.get(session.id);
+      if (nextAt !== undefined && now < nextAt) continue;
+
+      const project = config.projects[session.projectId];
+      const scm = project?.scm?.plugin ? registry.get<SCM>("scm", project.scm.plugin) : null;
+      const prs = normalizeSessionPRs(session);
+      if (!scm || prs.length === 0) {
+        // Nothing reconcilable — back off so we don't spin every poll.
+        scheduleTerminalReconcile(session.id);
+        continue;
+      }
+
+      let observedStates: PRState[];
+      try {
+        observedStates = await Promise.all(prs.map((pr) => scm.getPRState(pr)));
+      } catch (err) {
+        recordActivityEvent({
+          projectId: session.projectId,
+          sessionId: session.id,
+          source: "scm",
+          kind: "scm.poll_pr_failed",
+          level: "warn",
+          summary: `terminal reconcile getPRState failed for ${session.id}`,
+          data: {
+            plugin: project?.scm?.plugin,
+            prNumber: session.pr?.number ?? null,
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+        });
+        scheduleTerminalReconcile(session.id);
+        continue;
+      }
+
+      // Still open somewhere — keep waiting (backoff) until every PR resolves.
+      if (observedStates.some((state) => state === "open")) {
+        scheduleTerminalReconcile(session.id);
+        continue;
+      }
+
+      // Every tracked PR is merged/closed. "merged" wins for the canonical
+      // primary reason; a session whose PRs are all closed stays "closed".
+      const anyMerged = observedStates.some((state) => state === "merged");
+      const prState: PRState = anyMerged ? "merged" : "closed";
+      const prReason: CanonicalPRReason = anyMerged ? "merged" : "closed_unmerged";
+
+      // Persist canonical PR truth atomically. session.state stays terminal, so
+      // deriveLegacyStatus keeps the legacy status terminal (consistent with
+      // `ao status`); only the PR facet changes.
+      session.lifecycle.pr.state = prState;
+      session.lifecycle.pr.reason = prReason;
+      session.lifecycle.pr.lastObservedAt = new Date().toISOString();
+      updateSessionMetadata(session, {
+        // Overwrite the stale "Ready/mergeable" enrichment blob so any consumer
+        // reflects the resolved PR immediately (defense-in-depth alongside the
+        // dashboard's terminal guard).
+        prEnrichment: JSON.stringify({
+          state: prState,
+          ciStatus: "none",
+          reviewDecision: "none",
+          mergeable: false,
+          enrichedAt: new Date().toISOString(),
+        }),
+      });
+
+      recordActivityEvent({
+        projectId: session.projectId,
+        sessionId: session.id,
+        source: "lifecycle",
+        kind: "lifecycle.terminal_pr_reconciled",
+        summary: `terminal session ${session.id} PR → ${prState}`,
+        data: { prState, prNumber: session.pr?.number ?? null },
+      });
+      observer.recordOperation({
+        metric: "lifecycle_poll",
+        operation: "lifecycle.terminal_pr_reconciled",
+        outcome: "success",
+        correlationId: createCorrelationId("lifecycle-terminal-reconcile"),
+        projectId: session.projectId,
+        sessionId: session.id,
+        reason: primaryLifecycleReason(session.lifecycle),
+        data: { prState },
+        level: "info",
+      });
+
+      // Resolved — drop from the backoff schedule (leaves the cohort next poll).
+      forgetTerminalReconcile(session.id);
+
+      // Final AO-controlled cleanup: reclaim leftover workspace/runtime/agent
+      // mapping. Idempotent and safe even though the session is already
+      // terminal. Gated by autoCleanupOnMerge so users preserving worktrees
+      // keep them. Never restarts or messages the worker.
+      const { autoCleanupOnMerge = true } = config.lifecycle ?? {};
+      if (autoCleanupOnMerge) {
+        try {
+          await sessionManager.reclaimLeftovers(session.id, {
+            projectId: session.projectId,
+            purgeOpenCode: true,
+          });
+        } catch (err) {
+          recordActivityEvent({
+            projectId: session.projectId,
+            sessionId: session.id,
+            source: "lifecycle",
+            kind: "session.auto_cleanup_failed",
+            level: "warn",
+            summary: `terminal reconcile cleanup failed for ${session.id}`,
+            data: { errorMessage: err instanceof Error ? err.message : String(err) },
+          });
         }
       }
     }
@@ -3335,6 +3512,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       // web dashboard can read it without calling GitHub API.
       persistPREnrichmentToMetadata(sessionsToCheck);
 
+      // Reconcile terminal sessions whose tracked PR is still persisted as open.
+      // These are excluded from `sessionsToCheck` above, so this is the only
+      // place an external merge/close is observed after terminalization. It is
+      // SCM-read-only + idempotent cleanup — no worker restart/message.
+      await reconcileTerminalSessionPRs(sessions, new Set(sessionsToCheck.map((s) => s.id)));
+
       // Prune stale entries from states, reactionTrackers, and lastReviewBacklogCheckAt
       // for sessions that no longer appear in the session list (e.g., after kill/cleanup)
       const currentSessionIds = new Set(sessions.map((s) => s.id));
@@ -3362,6 +3545,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       for (const sessionId of lastReviewBacklogCheckAt.keys()) {
         if (!currentSessionIds.has(sessionId)) {
           lastReviewBacklogCheckAt.delete(sessionId);
+        }
+      }
+      for (const sessionId of terminalReconcileNextAt.keys()) {
+        if (!currentSessionIds.has(sessionId)) {
+          forgetTerminalReconcile(sessionId);
         }
       }
 

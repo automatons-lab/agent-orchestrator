@@ -265,10 +265,11 @@ describe("SessionCard", () => {
   });
 
   it("shows restore button when agent has exited", () => {
+    // An exited agent is terminal, so SessionCard renders the done/terminal
+    // variant (canonical terminal state as primary) with a restore affordance.
     const session = makeSession({ activity: "exited" });
     render(<SessionCard session={session} />);
-    // Header shows compact "restore"; expanded panel shows "restore session"
-    expect(screen.getByText("restore")).toHaveClass("session-card__restore-control");
+    expect(screen.getByText("restore")).toBeInTheDocument();
   });
 
   it("does not show restore button when agent is active", () => {

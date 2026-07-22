@@ -18,10 +18,13 @@ import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import {
+  AmbiguousSessionError,
   isIssueNotFoundError,
   isRestorable,
   isTerminalSession,
   NON_RESTORABLE_STATUSES,
+  TERMINAL_STATUSES,
+  SessionActiveError,
   SessionNotFoundError,
   SessionNotRestorableError,
   WorkspaceMissingError,
@@ -35,6 +38,10 @@ import {
   type ClaimPRResult,
   type KillOptions,
   type KillResult,
+  type PruneOptions,
+  type PruneResult,
+  type ReclaimLeftoversOptions,
+  type ReclaimLeftoversResult,
   type LifecycleKillReason,
   type OrchestratorConfig,
   type ProjectConfig,
@@ -2505,45 +2512,20 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     return null;
   }
 
-  async function kill(sessionId: SessionId, options?: KillOptions): Promise<KillResult> {
-    const located = findSessionRecord(sessionId);
-    if (!located) {
-      // Session not found via findSessionRecord — check if it exists with
-      // a terminated lifecycle so auto-cleanup retries don't throw.
-      for (const [killProjectId] of Object.entries(config.projects)) {
-        const sessionsDir = getProjectSessionsDir(killProjectId);
-        const raw = readMetadataRaw(sessionsDir, sessionId);
-        if (raw) {
-          const lifecycle = parseLifecycleFromRaw(raw);
-          if (lifecycle?.session.state === "terminated") {
-            return { cleaned: false, alreadyTerminated: true };
-          }
-        }
-      }
-      throw new SessionNotFoundError(sessionId);
-    }
-    const { raw, sessionsDir, project, projectId } = located;
-
-    // Idempotency: if lifecycle already says terminated, don't re-run destroys
-    // (which could double-purge opencode or race with concurrent kills).
-    const existingLifecycle = parseCanonicalLifecycle(raw);
-    if (existingLifecycle?.session.state === "terminated") {
-      return { cleaned: false, alreadyTerminated: true };
-    }
-
-    const killReason: LifecycleKillReason = options?.reason ?? "manually_killed";
-    const cleanupAgent = resolveSelectionForSession(project, sessionId, raw).agentName;
-
-    // Emit kill_started up-front — this is the only signal that the kill
-    // intent reached the manager (the destroys below are silent on failure).
-    recordActivityEvent({
-      projectId,
-      sessionId,
-      source: "session-manager",
-      kind: "session.kill_started",
-      summary: `kill started: ${sessionId}`,
-      data: { reason: killReason },
-    });
+  /**
+   * Best-effort teardown of a session's live resources: runtime handle,
+   * on-disk workspace (only inside AO-managed roots), and mapped OpenCode
+   * session. Every sub-step catches its own error and records an AE, so this
+   * never throws for a resource that is already gone — making it safe to call
+   * repeatedly (kill, reclaimLeftovers, prune). Does NOT touch lifecycle state
+   * or delete metadata; the caller decides what to persist.
+   */
+  async function reclaimSessionResources(
+    located: LocatedSession,
+    sessionId: SessionId,
+    opts: { purgeOpenCode: boolean; cleanupAgent: string },
+  ): Promise<{ didPurgeOpenCodeSession: boolean }> {
+    const { raw, project, projectId } = located;
 
     // Destroy runtime — prefer handle.runtimeName to find the correct plugin
     if (raw["runtimeHandle"]) {
@@ -2604,7 +2586,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     let didPurgeOpenCodeSession = false;
-    if (options?.purgeOpenCode === true && cleanupAgent === "opencode") {
+    if (opts.purgeOpenCode && opts.cleanupAgent === "opencode") {
       const mappedOpenCodeSessionId =
         asValidOpenCodeSessionId(raw["opencodeSessionId"]) ??
         (await discoverOpenCodeSessionIdByTitle(
@@ -2633,6 +2615,55 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         }
       }
     }
+
+    return { didPurgeOpenCodeSession };
+  }
+
+  async function kill(sessionId: SessionId, options?: KillOptions): Promise<KillResult> {
+    const located = findSessionRecord(sessionId);
+    if (!located) {
+      // Session not found via findSessionRecord — check if it exists with
+      // a terminated lifecycle so auto-cleanup retries don't throw.
+      for (const [killProjectId] of Object.entries(config.projects)) {
+        const sessionsDir = getProjectSessionsDir(killProjectId);
+        const raw = readMetadataRaw(sessionsDir, sessionId);
+        if (raw) {
+          const lifecycle = parseLifecycleFromRaw(raw);
+          if (lifecycle?.session.state === "terminated") {
+            return { cleaned: false, alreadyTerminated: true };
+          }
+        }
+      }
+      throw new SessionNotFoundError(sessionId);
+    }
+    const { raw, sessionsDir, project, projectId } = located;
+
+    // Idempotency: if lifecycle already says terminated, don't re-run destroys
+    // (which could double-purge opencode or race with concurrent kills).
+    const existingLifecycle = parseCanonicalLifecycle(raw);
+    if (existingLifecycle?.session.state === "terminated") {
+      return { cleaned: false, alreadyTerminated: true };
+    }
+
+    const killReason: LifecycleKillReason = options?.reason ?? "manually_killed";
+    const cleanupAgent = resolveSelectionForSession(project, sessionId, raw).agentName;
+
+    // Emit kill_started up-front — this is the only signal that the kill
+    // intent reached the manager (the destroys below are silent on failure).
+    recordActivityEvent({
+      projectId,
+      sessionId,
+      source: "session-manager",
+      kind: "session.kill_started",
+      summary: `kill started: ${sessionId}`,
+      data: { reason: killReason },
+    });
+
+    const { didPurgeOpenCodeSession } = await reclaimSessionResources(
+      { raw, sessionsDir, project, projectId },
+      sessionId,
+      { purgeOpenCode: options?.purgeOpenCode === true, cleanupAgent },
+    );
 
     const runtimeReason =
       killReason === "pr_merged"
@@ -2667,6 +2698,146 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       data: { reason: killReason },
     });
     return { cleaned: true, alreadyTerminated: false };
+  }
+
+  /**
+   * Locate a session id across ALL projects. Unlike findSessionRecord (which
+   * returns the first match), this returns every project that has a metadata
+   * file for the id, so callers can detect and disambiguate cross-project
+   * duplicates. When `projectId` is given, only that project is inspected.
+   */
+  function findAllSessionRecords(
+    sessionId: SessionId,
+    projectId?: string,
+  ): LocatedSession[] {
+    const located: LocatedSession[] = [];
+    for (const [pid, project] of Object.entries(config.projects)) {
+      if (projectId && pid !== projectId) continue;
+      const sessionsDir = getProjectSessionsDir(pid);
+      const raw = readMetadataRaw(sessionsDir, sessionId);
+      if (!raw) continue;
+      located.push({ raw, sessionsDir, project, projectId: pid });
+    }
+    return located;
+  }
+
+  /** A session record is terminal when its lifecycle is done/terminated or its
+   *  runtime has ended (missing/exited). Mirrors core isTerminalSession over
+   *  raw metadata so prune/reclaim agree with `ao status`. */
+  function isTerminalRecord(raw: Record<string, string>): boolean {
+    const lifecycle = parseLifecycleFromRaw(raw);
+    if (!lifecycle?.session) {
+      // No canonical lifecycle payload — fall back to legacy status.
+      return TERMINAL_STATUSES.has(validateStatus(raw["status"]));
+    }
+    return (
+      lifecycle.session.state === "done" ||
+      lifecycle.session.state === "terminated" ||
+      lifecycle.pr?.state === "merged" ||
+      lifecycle.runtime?.state === "missing" ||
+      lifecycle.runtime?.state === "exited"
+    );
+  }
+
+  async function reclaimLeftovers(
+    sessionId: SessionId,
+    options?: ReclaimLeftoversOptions,
+  ): Promise<ReclaimLeftoversResult> {
+    const matches = findAllSessionRecords(sessionId, options?.projectId);
+    // Idempotent: nothing on disk means nothing to reclaim.
+    if (matches.length === 0) {
+      return { reclaimed: false, projectId: options?.projectId ?? null, skipped: "not_found" };
+    }
+    // Without an explicit project we only reclaim when the id is unambiguous —
+    // reclaiming the wrong project's resources would be worse than a no-op.
+    const located =
+      matches.length === 1 ? matches[0] : matches.find((m) => m.projectId === options?.projectId);
+    if (!located) {
+      return { reclaimed: false, projectId: null, skipped: "not_found" };
+    }
+    const { raw, sessionsDir, project, projectId } = located;
+
+    // Never reclaim an active session's live resources.
+    if (!isTerminalRecord(raw)) {
+      return { reclaimed: false, projectId, skipped: "not_terminal" };
+    }
+
+    // Already reclaimed once — the teardown is idempotent, but skipping avoids
+    // re-attempting destroys every poll for a long-lived terminal record.
+    if (raw["leftoversReclaimedAt"]) {
+      return { reclaimed: false, projectId, skipped: "already_reclaimed" };
+    }
+
+    const cleanupAgent = resolveSelectionForSession(project, sessionId, raw).agentName;
+    const { didPurgeOpenCodeSession } = await reclaimSessionResources(located, sessionId, {
+      purgeOpenCode: options?.purgeOpenCode !== false,
+      cleanupAgent,
+    });
+
+    // Stamp reclamation + clear the mapped-agent id, but preserve the session's
+    // terminal state/reason (audit truth — e.g. runtime_lost stays intact).
+    updateMetadata(sessionsDir, sessionId, {
+      leftoversReclaimedAt: new Date().toISOString(),
+      ...(didPurgeOpenCodeSession && {
+        opencodeSessionId: "",
+        opencodeCleanedAt: new Date().toISOString(),
+      }),
+    });
+    invalidateCache();
+    recordActivityEvent({
+      projectId,
+      sessionId,
+      source: "session-manager",
+      kind: "session.leftovers_reclaimed",
+      summary: `leftovers reclaimed: ${sessionId}`,
+      data: { purgedOpenCode: didPurgeOpenCodeSession },
+    });
+    return { reclaimed: true, projectId };
+  }
+
+  async function prune(
+    sessionId: SessionId,
+    options?: PruneOptions,
+  ): Promise<PruneResult> {
+    const matches = findAllSessionRecords(sessionId, options?.projectId);
+    // Idempotent: already gone (or never existed in the given scope).
+    if (matches.length === 0) {
+      return { pruned: false, alreadyAbsent: true, projectId: options?.projectId ?? null };
+    }
+    // Refuse ambiguous bare ids — the operator must name the project.
+    if (matches.length > 1) {
+      throw new AmbiguousSessionError(
+        sessionId,
+        matches.map((m) => m.projectId),
+      );
+    }
+    const located = matches[0];
+    const { raw, sessionsDir, projectId } = located;
+
+    // Refuse active sessions by default — kill first, then prune.
+    if (!isTerminalRecord(raw)) {
+      throw new SessionActiveError(sessionId, projectId);
+    }
+
+    const cleanupAgent = resolveSelectionForSession(located.project, sessionId, raw).agentName;
+    await reclaimSessionResources(located, sessionId, {
+      purgeOpenCode: options?.purgeOpenCode !== false,
+      cleanupAgent,
+    });
+
+    // Remove ONLY this session's metadata file. Activity-event history lives in
+    // a separate store and is intentionally preserved for audit.
+    deleteMetadata(sessionsDir, sessionId);
+    invalidateCache();
+    recordActivityEvent({
+      projectId,
+      sessionId,
+      source: "session-manager",
+      kind: "session.pruned",
+      summary: `pruned: ${sessionId}`,
+      data: { projectId },
+    });
+    return { pruned: true, alreadyAbsent: false, projectId };
   }
 
   async function cleanup(
@@ -3724,6 +3895,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     invalidateCache,
     get,
     kill,
+    reclaimLeftovers,
+    prune,
     cleanup,
     send,
     claimPR,

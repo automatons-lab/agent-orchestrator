@@ -26,7 +26,7 @@ ao
 ├── init                        (deprecated — use ao start)
 ├── config-help                 Print the config schema and a guide
 ├── notify                      test
-├── session                     ls, attach, kill, cleanup, restore, claim-pr, remap
+├── session                     ls, attach, kill, prune, cleanup, restore, claim-pr, remap
 ├── setup                       dashboard, desktop, webhook, slack, discord, composio, openclaw
 └── plugin                      list, search, create, install, update, uninstall
 ```
@@ -228,6 +228,19 @@ No flags. Attaches via `tmux attach-session`. Only meaningful with `runtime: tmu
 | Flag | Default | Purpose |
 |---|---|---|
 | `--purge-session` | — | Delete the mapped OpenCode session |
+
+`kill` marks the session terminal and tears down its runtime/worktree, but **keeps** its metadata — the session still shows under `ao session ls --include-terminated` and can be `restore`d.
+
+### `ao session prune <session>`
+
+> Permanently remove ONE terminal session (metadata + leftover workspace)
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-p, --project <id>` | — | Disambiguate an id shared across projects |
+| `-y, --yes` | — | Skip the confirmation prompt |
+
+Unlike `kill`, `prune` **permanently deletes** a single terminal session so it disappears from history entirely: it reclaims the leftover workspace, removes the session's metadata file, and invalidates caches. It **refuses active sessions** (kill them first), is idempotent (a missing session is a no-op), preserves activity-event history and the PR/branch, and never deletes files outside AO-managed roots. Pass `<project>:<session>` (or `--project`) when the same id exists in multiple projects. In the dashboard, use the **Remove** button on a card in the Done / Terminated bar.
 
 ### `ao session cleanup`
 

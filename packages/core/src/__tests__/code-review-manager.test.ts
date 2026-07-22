@@ -123,6 +123,8 @@ function makeSessionManager(
       throw new Error("not implemented");
     },
     kill: async () => ({ cleaned: false, alreadyTerminated: false }),
+    reclaimLeftovers: async () => ({ reclaimed: false, projectId: null }),
+    prune: async () => ({ pruned: false, alreadyAbsent: true, projectId: null }),
     cleanup: async () => ({ killed: [], skipped: [], errors: [] }),
     send: async () => {},
     claimPR: async () => {

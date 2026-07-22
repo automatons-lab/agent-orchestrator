@@ -13,14 +13,16 @@ import {
   updateMetadata,
 } from "../../metadata.js";
 import { getProjectSessionsDir, getProjectWorktreesDir } from "../../paths.js";
-import type {
-  OrchestratorConfig,
-  PluginRegistry,
-  Runtime,
-  Agent,
-  Workspace,
-  Tracker,
-  SCM,
+import {
+  AmbiguousSessionError,
+  SessionActiveError,
+  type OrchestratorConfig,
+  type PluginRegistry,
+  type Runtime,
+  type Agent,
+  type Workspace,
+  type Tracker,
+  type SCM,
 } from "../../types.js";
 import { setupTestContext, teardownTestContext, makeHandle, type TestContext } from "../test-utils.js";
 import { installMockOpencode, installMockOpencodeWithNotFoundDelete, PATH_SEP } from "./opencode-helpers.js";
@@ -705,5 +707,210 @@ describe("cleanup", () => {
     const result = await sm.cleanup();
 
     expect(result.killed).toContain("app-1");
+  });
+});
+
+/** Write a terminal (runtime-lost) session with a managed worktree + open PR. */
+function writeTerminalSession(
+  dir: string,
+  id: string,
+  projectId: string,
+  extra: { worktree?: string; opencodeSessionId?: string; agent?: string; prState?: string } = {},
+): string {
+  const iso = new Date().toISOString();
+  const worktree = extra.worktree ?? join(getProjectWorktreesDir(projectId), id);
+  const lifecycle = {
+    version: 2,
+    session: {
+      kind: "worker",
+      state: "terminated",
+      reason: "runtime_lost",
+      startedAt: iso,
+      completedAt: null,
+      terminatedAt: iso,
+      lastTransitionAt: iso,
+    },
+    pr: {
+      state: extra.prState ?? "open",
+      reason: "merge_ready",
+      number: 42,
+      url: "https://github.com/org/my-app/pull/42",
+      lastObservedAt: iso,
+    },
+    runtime: {
+      state: "missing",
+      reason: "tmux_missing",
+      lastObservedAt: iso,
+      handle: null,
+      tmuxName: null,
+    },
+  };
+  writeMetadata(dir, id, {
+    worktree,
+    branch: "feat/x",
+    status: "killed",
+    project: projectId,
+    ...(extra.agent ? { agent: extra.agent } : {}),
+    ...(extra.opencodeSessionId ? { opencodeSessionId: extra.opencodeSessionId } : {}),
+    runtimeHandle: makeHandle("rt-1"),
+  });
+  updateMetadata(dir, id, { lifecycle: JSON.stringify(lifecycle) });
+  return worktree;
+}
+
+describe("reclaimLeftovers", () => {
+  it("reclaims a terminal session's runtime + workspace without rewriting its terminal reason", async () => {
+    const worktree = writeTerminalSession(sessionsDir, "app-1", "my-app");
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.reclaimLeftovers("app-1", { projectId: "my-app" });
+
+    expect(result.reclaimed).toBe(true);
+    expect(mockRuntime.destroy).toHaveBeenCalledWith(makeHandle("rt-1"));
+    expect(mockWorkspace.destroy).toHaveBeenCalledWith(worktree);
+
+    // Metadata is NOT deleted; the terminal reason (runtime_lost) is preserved.
+    const meta = readMetadataRaw(sessionsDir, "app-1");
+    expect(meta).not.toBeNull();
+    expect(meta!["leftoversReclaimedAt"]).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    expect(JSON.parse(meta!["lifecycle"]!).session.reason).toBe("runtime_lost");
+  });
+
+  it("is idempotent — a second call is a no-op", async () => {
+    writeTerminalSession(sessionsDir, "app-1", "my-app");
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    const first = await sm.reclaimLeftovers("app-1", { projectId: "my-app" });
+    expect(first.reclaimed).toBe(true);
+
+    vi.mocked(mockWorkspace.destroy).mockClear();
+    const second = await sm.reclaimLeftovers("app-1", { projectId: "my-app" });
+    expect(second.reclaimed).toBe(false);
+    expect(second.skipped).toBe("already_reclaimed");
+    expect(mockWorkspace.destroy).not.toHaveBeenCalled();
+  });
+
+  it("refuses to reclaim an active (non-terminal) session", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: join(getProjectWorktreesDir("my-app"), "app-1"),
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: makeHandle("rt-1"),
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.reclaimLeftovers("app-1", { projectId: "my-app" });
+
+    expect(result.reclaimed).toBe(false);
+    expect(result.skipped).toBe("not_terminal");
+    expect(mockWorkspace.destroy).not.toHaveBeenCalled();
+  });
+
+  it("no-ops when the session does not exist", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.reclaimLeftovers("app-404", { projectId: "my-app" });
+    expect(result.reclaimed).toBe(false);
+    expect(result.skipped).toBe("not_found");
+  });
+});
+
+describe("prune", () => {
+  it("removes only the requested terminal session's metadata + workspace", async () => {
+    const worktree1 = writeTerminalSession(sessionsDir, "app-1", "my-app");
+    writeMetadata(sessionsDir, "app-2", {
+      worktree: join(getProjectWorktreesDir("my-app"), "app-2"),
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: makeHandle("rt-2"),
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.prune("app-1", { projectId: "my-app" });
+
+    expect(result).toEqual({ pruned: true, alreadyAbsent: false, projectId: "my-app" });
+    expect(mockWorkspace.destroy).toHaveBeenCalledWith(worktree1);
+    // Only app-1 is gone; app-2 is untouched.
+    expect(readMetadataRaw(sessionsDir, "app-1")).toBeNull();
+    expect(readMetadataRaw(sessionsDir, "app-2")).not.toBeNull();
+  });
+
+  it("refuses to prune an active session", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: join(getProjectWorktreesDir("my-app"), "app-1"),
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: makeHandle("rt-1"),
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await expect(sm.prune("app-1")).rejects.toBeInstanceOf(SessionActiveError);
+    // Not deleted.
+    expect(readMetadataRaw(sessionsDir, "app-1")).not.toBeNull();
+  });
+
+  it("is idempotent — pruning a missing session reports alreadyAbsent", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.prune("app-404", { projectId: "my-app" });
+    expect(result).toEqual({ pruned: false, alreadyAbsent: true, projectId: "my-app" });
+  });
+
+  it("refuses an ambiguous bare id shared across projects, but targets one with projectId", async () => {
+    const project2Path = join(tmpDir, "my-app-2");
+    const configWith2: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app-2": {
+          name: "My App 2",
+          repo: "org/my-app-2",
+          path: project2Path,
+          defaultBranch: "main",
+          sessionPrefix: "app",
+          scm: { plugin: "github" },
+          tracker: { plugin: "github" },
+        },
+      },
+    };
+    const sessionsDir2 = getProjectSessionsDir("my-app-2");
+    mkdirSync(sessionsDir2, { recursive: true });
+
+    writeTerminalSession(sessionsDir, "app-1", "my-app");
+    writeTerminalSession(sessionsDir2, "app-1", "my-app-2");
+
+    const sm = createSessionManager({ config: configWith2, registry: mockRegistry });
+
+    // Bare id is ambiguous → refuse (nothing deleted).
+    await expect(sm.prune("app-1")).rejects.toBeInstanceOf(AmbiguousSessionError);
+    expect(readMetadataRaw(sessionsDir, "app-1")).not.toBeNull();
+    expect(readMetadataRaw(sessionsDir2, "app-1")).not.toBeNull();
+
+    // Disambiguated → only the named project's session is removed.
+    const result = await sm.prune("app-1", { projectId: "my-app-2" });
+    expect(result.projectId).toBe("my-app-2");
+    expect(readMetadataRaw(sessionsDir2, "app-1")).toBeNull();
+    expect(readMetadataRaw(sessionsDir, "app-1")).not.toBeNull();
+  });
+
+  it("invalidates the session cache so a pruned session disappears from listCached", async () => {
+    writeTerminalSession(sessionsDir, "app-1", "my-app");
+    writeMetadata(sessionsDir, "app-2", {
+      worktree: join(getProjectWorktreesDir("my-app"), "app-2"),
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: makeHandle("rt-2"),
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const before = await sm.listCached();
+    expect(before.map((s) => s.id).sort()).toEqual(["app-1", "app-2"]);
+
+    await sm.prune("app-1", { projectId: "my-app" });
+
+    const after = await sm.listCached();
+    expect(after.map((s) => s.id)).toEqual(["app-2"]);
   });
 });

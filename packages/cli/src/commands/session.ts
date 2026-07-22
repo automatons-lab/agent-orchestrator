@@ -3,11 +3,13 @@ import { connect as netConnect } from "node:net";
 import chalk from "chalk";
 import type { Command } from "commander";
 import {
+  AmbiguousSessionError,
   generateConfigHash,
   isOrchestratorSession,
   isTerminalSession,
   isWindows,
   loadConfig,
+  SessionActiveError,
   SessionNotRestorableError,
   WorkspaceMissingError,
 } from "@aoagents/ao-core";
@@ -17,6 +19,8 @@ import { formatAge } from "../lib/format.js";
 import { getSessionManager } from "../lib/create-session-manager.js";
 import { isOrchestratorSessionName } from "../lib/session-utils.js";
 import { projectSessionUrl } from "../lib/routes.js";
+import { promptConfirm } from "../lib/prompts.js";
+import { isHumanCaller } from "../lib/caller-context.js";
 
 interface SessionListEntry {
   id: string;
@@ -34,7 +38,7 @@ interface SessionListEntry {
 export function registerSession(program: Command): void {
   const session = program
     .command("session")
-    .description("Session management (ls, kill, cleanup, restore, claim-pr)");
+    .description("Session management (ls, kill, prune, cleanup, restore, claim-pr)");
 
   session
     .command("ls")
@@ -354,6 +358,66 @@ export function registerSession(program: Command): void {
         console.log(chalk.green(`\nSession ${sessionName} killed.`));
       } catch (err) {
         console.error(chalk.red(`Failed to kill session ${sessionName}: ${err}`));
+        process.exit(1);
+      }
+    });
+
+  session
+    .command("prune")
+    .description(
+      "Permanently remove ONE terminal session (metadata + leftover workspace). " +
+        "Refuses active sessions; preserves activity history and the PR/branch.",
+    )
+    .argument(
+      "<session>",
+      "Session to prune. Use project:session to disambiguate an id shared across projects.",
+    )
+    .option("-p, --project <id>", "Project ID (disambiguates a session id shared across projects)")
+    .option("-y, --yes", "Skip the confirmation prompt")
+    .action(async (sessionArg: string, opts: { project?: string; yes?: boolean }) => {
+      const config = loadConfig();
+
+      // Support the project:session form (as printed by `session cleanup`).
+      const separator = sessionArg.indexOf(":");
+      const inlineProjectId = separator === -1 ? undefined : sessionArg.slice(0, separator);
+      const sessionName = separator === -1 ? sessionArg : sessionArg.slice(separator + 1);
+      const projectId = opts.project ?? inlineProjectId;
+
+      if (projectId && !config.projects[projectId]) {
+        console.error(chalk.red(`Unknown project: ${projectId}`));
+        process.exit(1);
+      }
+
+      if (opts.yes !== true && isHumanCaller()) {
+        const confirmed = await promptConfirm(
+          `Permanently remove terminal session "${sessionName}"? This cannot be undone.`,
+          false,
+        );
+        if (!confirmed) {
+          console.log(chalk.yellow("Prune cancelled."));
+          return;
+        }
+      }
+
+      const sm = await getSessionManager(config);
+      try {
+        const result = await sm.prune(sessionName, { projectId });
+        if (result.alreadyAbsent) {
+          console.log(chalk.dim(`Session ${sessionName} not found — nothing to prune.`));
+          return;
+        }
+        const label = result.projectId ? `${result.projectId}:${sessionName}` : sessionName;
+        console.log(chalk.green(`\nSession ${label} pruned.`));
+      } catch (err) {
+        if (err instanceof AmbiguousSessionError || err instanceof SessionActiveError) {
+          console.error(chalk.red(err.message));
+          process.exit(1);
+        }
+        console.error(
+          chalk.red(
+            `Failed to prune session ${sessionName}: ${err instanceof Error ? err.message : err}`,
+          ),
+        );
         process.exit(1);
       }
     });

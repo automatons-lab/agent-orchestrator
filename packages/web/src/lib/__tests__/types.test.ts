@@ -435,14 +435,16 @@ describe("getAttentionLevel", () => {
       expect(getAttentionLevel(session)).toBe("respond");
     });
 
-    it("should return 'respond' for errored status", () => {
+    it("treats errored status as terminal (done), consistent with `ao status`", () => {
+      // errored ∈ TERMINAL_STATUSES; core `isTerminalSession` treats it as
+      // terminal, so the dashboard classifies it as done, not an attention item.
       const session = createSession({ status: "errored" });
-      expect(getAttentionLevel(session)).toBe("respond");
+      expect(getAttentionLevel(session)).toBe("done");
     });
 
-    it("should return 'respond' for exited activity", () => {
+    it("treats exited activity as terminal (done), consistent with `ao status`", () => {
       const session = createSession({ activity: "exited" });
-      expect(getAttentionLevel(session)).toBe("respond");
+      expect(getAttentionLevel(session)).toBe("done");
     });
   });
 

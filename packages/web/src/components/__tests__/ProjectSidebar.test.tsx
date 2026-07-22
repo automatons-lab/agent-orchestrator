@@ -318,7 +318,7 @@ describe("ProjectSidebar", () => {
     expect(screen.queryByRole("link", { name: "Open feat/test" })).not.toBeInTheDocument();
   });
 
-  it("keeps killed sessions visible when they still need attention", () => {
+  it("treats a runtime-lost session with a stale open PR as terminal (hidden from active), consistent with `ao status`", () => {
     const lastActivityAt = new Date().toISOString();
 
     render(
@@ -399,12 +399,14 @@ describe("ProjectSidebar", () => {
       />,
     );
 
-    // Only the killed-but-still-needs-attention session is counted; the merged
-    // session is filtered out by sessionsByProject (showDone = false by default).
-    expect(screen.getByRole("button", { name: /^Project One 1$/ })).toBeInTheDocument();
+    // The runtime-lost session (runtimeState "missing") is terminal — just like
+    // the merged one — so BOTH are filtered out of the default (active) sidebar
+    // by sessionsByProject (showDone = false). Active count is 0, matching
+    // `ao status`. Terminal sessions live in the explicit done/terminated view.
+    expect(screen.getByRole("button", { name: /^Project One 0$/ })).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "Open Runtime missing but needs review" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("link", { name: "Open Runtime missing but needs review" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Open Actually finished" })).not.toBeInTheDocument();
   });
 

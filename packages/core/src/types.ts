@@ -1940,6 +1940,43 @@ export interface KillOptions {
   reason?: LifecycleKillReason;
 }
 
+/**
+ * Options for reclaiming leftover resources of an already-terminal session.
+ * `projectId` disambiguates when the same session id exists in multiple projects.
+ */
+export interface ReclaimLeftoversOptions {
+  projectId?: string;
+  purgeOpenCode?: boolean;
+}
+
+/**
+ * Outcome of reclaimLeftovers(). `reclaimed` means teardown ran this call;
+ * `skipped` is set with a reason when the session was absent, still active, or
+ * already reclaimed (all no-ops, so the call is idempotent).
+ */
+export interface ReclaimLeftoversResult {
+  reclaimed: boolean;
+  projectId: string | null;
+  skipped?: "not_found" | "not_terminal" | "already_reclaimed";
+}
+
+/** Options for prune(). `projectId` disambiguates duplicate ids across projects. */
+export interface PruneOptions {
+  projectId?: string;
+  purgeOpenCode?: boolean;
+}
+
+/**
+ * Outcome of prune(). `pruned` means the session's metadata + validated
+ * leftovers were removed this call. `alreadyAbsent` means no metadata existed
+ * (idempotent no-op). `projectId` is the project the session was pruned from.
+ */
+export interface PruneResult {
+  pruned: boolean;
+  alreadyAbsent: boolean;
+  projectId: string | null;
+}
+
 /** Session manager — CRUD for sessions */
 export interface SessionManager {
   spawn(config: SessionSpawnConfig): Promise<Session>;
@@ -1960,6 +1997,26 @@ export interface SessionManager {
     projectId?: string,
     options?: { dryRun?: boolean; purgeOpenCode?: boolean },
   ): Promise<CleanupResult>;
+  /**
+   * Idempotently reclaim leftover runtime/workspace/agent-mapping resources of
+   * an already-terminal session WITHOUT rewriting its terminal state or reason
+   * (preserving audit truth) and WITHOUT deleting its metadata. Used by the
+   * lifecycle reconciler when an external PR merge/close is observed after the
+   * session already terminalized. No-op for absent or still-active sessions.
+   */
+  reclaimLeftovers(
+    sessionId: SessionId,
+    options?: ReclaimLeftoversOptions,
+  ): Promise<ReclaimLeftoversResult>;
+  /**
+   * Permanently remove ONE terminal session: reclaim validated leftovers, then
+   * delete its metadata file and invalidate caches. Refuses active sessions and
+   * throws AmbiguousSessionError when the id exists in multiple projects and no
+   * projectId is given. Idempotent — a missing session returns alreadyAbsent.
+   * Never deletes activity-event history, GitHub PRs/issues/branches, or files
+   * outside AO-managed roots.
+   */
+  prune(sessionId: SessionId, options?: PruneOptions): Promise<PruneResult>;
   send(sessionId: SessionId, message: string): Promise<void>;
   claimPR(sessionId: SessionId, prRef: string, options?: ClaimPROptions): Promise<ClaimPRResult>;
 }
@@ -2094,6 +2151,37 @@ export class SessionNotFoundError extends Error {
   constructor(public readonly sessionId: string) {
     super(`Session not found: ${sessionId}`);
     this.name = "SessionNotFoundError";
+  }
+}
+
+/**
+ * Thrown by prune() when a bare session id resolves to records in more than one
+ * project and no explicit projectId was given to disambiguate.
+ */
+export class AmbiguousSessionError extends Error {
+  constructor(
+    public readonly sessionId: string,
+    public readonly projectIds: string[],
+  ) {
+    super(
+      `Session "${sessionId}" exists in multiple projects: ${projectIds.join(
+        ", ",
+      )}. Pass an explicit project (e.g. "${projectIds[0]}:${sessionId}") to disambiguate.`,
+    );
+    this.name = "AmbiguousSessionError";
+  }
+}
+
+/** Thrown by prune() when the target session is not in a terminal state. */
+export class SessionActiveError extends Error {
+  constructor(
+    public readonly sessionId: string,
+    public readonly projectId: string,
+  ) {
+    super(
+      `Session "${sessionId}" is still active. Kill it first (\`ao session kill\`) before pruning.`,
+    );
+    this.name = "SessionActiveError";
   }
 }
 

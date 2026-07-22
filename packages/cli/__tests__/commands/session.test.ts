@@ -16,6 +16,8 @@ import {
   type Session,
   type CleanupResult,
   type SessionManager,
+  AmbiguousSessionError,
+  SessionActiveError,
   SessionNotFoundError,
   createInitialCanonicalLifecycle,
   createActivitySignal,
@@ -45,6 +47,8 @@ const {
   mockSessionManager: {
     list: vi.fn(),
     kill: vi.fn(),
+    reclaimLeftovers: vi.fn(),
+    prune: vi.fn(),
     cleanup: vi.fn(),
     restore: vi.fn(),
     remap: vi.fn(),
@@ -218,6 +222,8 @@ beforeEach(() => {
   mockSpawn.mockReset();
   mockSessionManager.list.mockReset();
   mockSessionManager.kill.mockReset();
+  mockSessionManager.prune.mockReset();
+  mockSessionManager.reclaimLeftovers.mockReset();
   mockSessionManager.cleanup.mockReset();
   mockSessionManager.restore.mockReset();
   mockSessionManager.remap.mockReset();
@@ -717,6 +723,81 @@ describe("session kill", () => {
     await program.parseAsync(["node", "test", "session", "kill", "app-1", "--purge-session"]);
 
     expect(mockSessionManager.kill).toHaveBeenCalledWith("app-1", { purgeOpenCode: true });
+  });
+});
+
+describe("session prune", () => {
+  it("prunes a terminal session and reports success", async () => {
+    mockSessionManager.prune.mockResolvedValue({
+      pruned: true,
+      alreadyAbsent: false,
+      projectId: "my-app",
+    });
+
+    await program.parseAsync(["node", "test", "session", "prune", "app-1", "--yes"]);
+
+    expect(mockSessionManager.prune).toHaveBeenCalledWith("app-1", { projectId: undefined });
+    const output = consoleSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(output).toContain("pruned");
+  });
+
+  it("parses the project:session form for disambiguation", async () => {
+    mockSessionManager.prune.mockResolvedValue({
+      pruned: true,
+      alreadyAbsent: false,
+      projectId: "my-app",
+    });
+
+    await program.parseAsync(["node", "test", "session", "prune", "my-app:app-1", "--yes"]);
+
+    expect(mockSessionManager.prune).toHaveBeenCalledWith("app-1", { projectId: "my-app" });
+  });
+
+  it("reports alreadyAbsent when the session is already gone (idempotent)", async () => {
+    mockSessionManager.prune.mockResolvedValue({
+      pruned: false,
+      alreadyAbsent: true,
+      projectId: null,
+    });
+
+    await program.parseAsync(["node", "test", "session", "prune", "app-404", "--yes"]);
+
+    const output = consoleSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(output).toContain("nothing to prune");
+  });
+
+  it("refuses an active session (exit 1)", async () => {
+    mockSessionManager.prune.mockRejectedValue(new SessionActiveError("app-1", "my-app"));
+
+    await expect(
+      program.parseAsync(["node", "test", "session", "prune", "app-1", "--yes"]),
+    ).rejects.toThrow("process.exit(1)");
+  });
+
+  it("refuses an ambiguous id shared across projects (exit 1)", async () => {
+    mockSessionManager.prune.mockRejectedValue(
+      new AmbiguousSessionError("app-1", ["my-app", "my-app-2"]),
+    );
+
+    await expect(
+      program.parseAsync(["node", "test", "session", "prune", "app-1", "--yes"]),
+    ).rejects.toThrow("process.exit(1)");
+  });
+
+  it("rejects an unknown --project without calling prune", async () => {
+    await expect(
+      program.parseAsync([
+        "node",
+        "test",
+        "session",
+        "prune",
+        "app-1",
+        "--project",
+        "nope",
+        "--yes",
+      ]),
+    ).rejects.toThrow("process.exit(1)");
+    expect(mockSessionManager.prune).not.toHaveBeenCalled();
   });
 });
 

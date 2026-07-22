@@ -82,9 +82,11 @@ function mergeOrchestrators(
 function DoneCard({
   session,
   onRestore,
+  onPrune,
 }: {
   session: DashboardSession;
   onRestore: (id: string) => void;
+  onPrune: (id: string) => void;
 }) {
   const title =
     (!session.summaryIsFallback && session.summary) ||
@@ -138,6 +140,17 @@ function DoneCard({
             Restore
           </button>
         ) : null}
+        <button
+          type="button"
+          className="done-card__prune"
+          title="Permanently remove this terminal session (keeps activity history and the PR)"
+          onClick={(e) => {
+            e.stopPropagation();
+            onPrune(session.id);
+          }}
+        >
+          Remove
+        </button>
       </div>
     </div>
   );
@@ -437,6 +450,39 @@ function DashboardInner({
       } catch (error) {
         console.error(`Network error restoring ${sessionId}:`, error);
         showToast("Network error while restoring session", "error");
+      }
+    },
+    [showToast],
+  );
+
+  const handlePrune = useCallback(
+    async (sessionId: string) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId) ?? null;
+      if (
+        typeof window !== "undefined" &&
+        !window.confirm(
+          `Permanently remove terminal session "${sessionId}"? This deletes its metadata and leftover workspace but preserves activity history and the PR/branch.`,
+        )
+      ) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/prune`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(session?.projectId ? { projectId: session.projectId } : {}),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          console.error(`Failed to prune ${sessionId}:`, text);
+          showToast(`Remove failed: ${text}`, "error");
+        } else {
+          showToast("Session removed", "success");
+          routerRef.current.refresh();
+        }
+      } catch (error) {
+        console.error(`Network error pruning ${sessionId}:`, error);
+        showToast("Network error while removing session", "error");
       }
     },
     [showToast],
@@ -781,7 +827,12 @@ function DashboardInner({
                 {doneExpanded && (
                   <div className="done-bar__cards">
                     {grouped.done.map((session) => (
-                      <DoneCard key={session.id} session={session} onRestore={handleRestore} />
+                      <DoneCard
+                        key={session.id}
+                        session={session}
+                        onRestore={handleRestore}
+                        onPrune={handlePrune}
+                      />
                     ))}
                   </div>
                 )}

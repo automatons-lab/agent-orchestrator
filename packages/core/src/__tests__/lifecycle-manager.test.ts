@@ -4368,6 +4368,173 @@ describe("auto-cleanup on merge (#1309)", () => {
   });
 });
 
+describe("terminal-PR reconciliation (dead session, PR resolves later)", () => {
+  // A session whose runtime was lost while its PR was still open + merge_ready:
+  // excluded from the normal poll, so the reconciler is the only thing that
+  // re-reads its PR state.
+  function makeTerminalOpenPRSession() {
+    const pr = makeMatchingPR();
+    const session = makeSession({ status: "killed", pr, activity: "exited" });
+    session.lifecycle.session.reason = "runtime_lost";
+    session.lifecycle.runtime.state = "missing";
+    session.lifecycle.runtime.reason = "tmux_missing";
+    session.lifecycle.pr.state = "open";
+    session.lifecycle.pr.reason = "merge_ready";
+    session.lifecycle.pr.url = pr.url;
+    session.lifecycle.pr.number = pr.number;
+    return session;
+  }
+
+  it("records merged on poll and reclaims leftovers without messaging the worker", async () => {
+    vi.useFakeTimers();
+    try {
+      const mergedScm = createMockSCM({ getPRState: vi.fn().mockResolvedValue("merged") });
+      const registry = createMockRegistry({
+        runtime: plugins.runtime,
+        agent: plugins.agent,
+        scm: mergedScm,
+      });
+      const session = makeTerminalOpenPRSession();
+      const lm = setupPollCheck("app-1", { session, registry });
+
+      lm.start(60_000);
+      await vi.advanceTimersByTimeAsync(0);
+      lm.stop();
+
+      expect(session.lifecycle.pr.state).toBe("merged");
+      expect(session.lifecycle.pr.reason).toBe("merged");
+      expect(mockSessionManager.reclaimLeftovers).toHaveBeenCalledWith(
+        "app-1",
+        expect.objectContaining({ projectId: "my-app" }),
+      );
+      // The worker is NEVER restored/restarted/messaged.
+      expect(mockSessionManager.send).not.toHaveBeenCalled();
+      expect(mockSessionManager.restore).not.toHaveBeenCalled();
+      // Only the lightweight getPRState read is used for terminal sessions.
+      expect(mergedScm.getPRState).toHaveBeenCalled();
+      // Session stays terminal (consistent with `ao status`).
+      expect(session.status).toBe("killed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays quiet while the PR is open, then records merged on a later poll", async () => {
+    vi.useFakeTimers();
+    try {
+      const getPRState = vi.fn().mockResolvedValue("open");
+      const scm = createMockSCM({ getPRState });
+      const registry = createMockRegistry({
+        runtime: plugins.runtime,
+        agent: plugins.agent,
+        scm,
+      });
+      const session = makeTerminalOpenPRSession();
+      const lm = setupPollCheck("app-1", { session, registry });
+
+      lm.start(60_000);
+      await vi.advanceTimersByTimeAsync(0); // poll #1 — PR still open
+      expect(session.lifecycle.pr.state).toBe("open");
+      expect(mockSessionManager.reclaimLeftovers).not.toHaveBeenCalled();
+
+      // PR merges externally; the next poll (after the backoff window) sees it.
+      getPRState.mockResolvedValue("merged");
+      await vi.advanceTimersByTimeAsync(60_000); // poll #2
+      lm.stop();
+
+      expect(session.lifecycle.pr.state).toBe("merged");
+      expect(mockSessionManager.reclaimLeftovers).toHaveBeenCalledTimes(1);
+      expect(mockSessionManager.send).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("overwrites stale mergeable enrichment so the dashboard reflects the merge", async () => {
+    vi.useFakeTimers();
+    try {
+      const scm = createMockSCM({ getPRState: vi.fn().mockResolvedValue("merged") });
+      const registry = createMockRegistry({
+        runtime: plugins.runtime,
+        agent: plugins.agent,
+        scm,
+      });
+      const session = makeTerminalOpenPRSession();
+      const lm = setupPollCheck("app-1", {
+        session,
+        registry,
+        metaOverrides: {
+          prEnrichment: JSON.stringify({ state: "open", mergeable: true, ciStatus: "passing" }),
+        },
+      });
+
+      lm.start(60_000);
+      await vi.advanceTimersByTimeAsync(0);
+      lm.stop();
+
+      const meta = readMetadataRaw(env.sessionsDir, "app-1");
+      const enrichment = JSON.parse(meta!["prEnrichment"]!);
+      expect(enrichment.state).toBe("merged");
+      expect(enrichment.mergeable).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records closed_unmerged when the PR is closed without merging", async () => {
+    vi.useFakeTimers();
+    try {
+      const scm = createMockSCM({ getPRState: vi.fn().mockResolvedValue("closed") });
+      const registry = createMockRegistry({
+        runtime: plugins.runtime,
+        agent: plugins.agent,
+        scm,
+      });
+      const session = makeTerminalOpenPRSession();
+      const lm = setupPollCheck("app-1", { session, registry });
+
+      lm.start(60_000);
+      await vi.advanceTimersByTimeAsync(0);
+      lm.stop();
+
+      expect(session.lifecycle.pr.state).toBe("closed");
+      expect(session.lifecycle.pr.reason).toBe("closed_unmerged");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves leftovers when autoCleanupOnMerge is disabled but still records the merge", async () => {
+    vi.useFakeTimers();
+    try {
+      const scm = createMockSCM({ getPRState: vi.fn().mockResolvedValue("merged") });
+      const registry = createMockRegistry({
+        runtime: plugins.runtime,
+        agent: plugins.agent,
+        scm,
+      });
+      const session = makeTerminalOpenPRSession();
+      const lm = setupPollCheck("app-1", {
+        session,
+        registry,
+        configOverride: {
+          ...config,
+          lifecycle: { autoCleanupOnMerge: false, mergeCleanupIdleGraceMs: 300_000 },
+        },
+      });
+
+      lm.start(60_000);
+      await vi.advanceTimersByTimeAsync(0);
+      lm.stop();
+
+      expect(session.lifecycle.pr.state).toBe("merged");
+      expect(mockSessionManager.reclaimLeftovers).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("event enrichment", () => {
   it("includes PR context in event data when session has PR", async () => {
     const notifier = createMockNotifier();
