@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { RuntimeHandle } from "@aoagents/ao-core";
+
+vi.mock("node:timers/promises", () => ({
+  setTimeout: vi.fn().mockResolvedValue(undefined),
+}));
 
 // Mock node:child_process with custom promisify support
 vi.mock("node:child_process", () => {
@@ -392,6 +397,43 @@ describe("runtime.destroy()", () => {
 });
 
 describe("runtime.sendMessage()", () => {
+  it.each(["hello world", "x".repeat(250), "line1\nline2\nline3"])(
+    "waits two seconds after inserting %j before sending one Enter",
+    async (message) => {
+      const runtime = create();
+      const handle = makeHandle("msg-delay");
+      let releaseDelay!: () => void;
+      const delay = new Promise<void>((resolve) => {
+        releaseDelay = resolve;
+      });
+      vi.mocked(sleep).mockReturnValueOnce(delay);
+      const commandCount = message.includes("\n") || message.length > 200 ? 5 : 3;
+      for (let i = 0; i < commandCount; i++) mockTmuxSuccess();
+
+      const sending = runtime.sendMessage(handle, message);
+      try {
+        await vi.waitFor(() => expect(sleep).toHaveBeenCalledOnce());
+        expect(sleep).toHaveBeenCalledWith(2_000);
+        expect(mockExecFileCustom).toHaveBeenCalledTimes(commandCount - 1);
+        expect(mockExecFileCustom).not.toHaveBeenCalledWith(
+          "tmux",
+          ["send-keys", "-t", "msg-delay", "Enter"],
+          expectedTmuxOptions,
+        );
+      } finally {
+        releaseDelay();
+        await sending;
+      }
+
+      expect(mockExecFileCustom).toHaveBeenCalledTimes(commandCount);
+      expect(mockExecFileCustom).toHaveBeenLastCalledWith(
+        "tmux",
+        ["send-keys", "-t", "msg-delay", "Enter"],
+        expectedTmuxOptions,
+      );
+    },
+  );
+
   it("sends short text with send-keys -l (literal) + Enter", async () => {
     const runtime = create();
     const handle = makeHandle("msg-short");

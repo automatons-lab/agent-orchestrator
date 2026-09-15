@@ -183,9 +183,8 @@ export function create(): Runtime {
         await tmux("send-keys", "-t", handle.id, "-l", message);
       }
 
-      // Small delay to let tmux process the pasted text before pressing Enter.
-      // Without this, Enter can arrive before the text is fully rendered.
-      await sleep(300);
+      // Give the agent two seconds to process the inserted text before Enter.
+      await sleep(2_000);
       await tmux("send-keys", "-t", handle.id, "Enter");
     },
 
