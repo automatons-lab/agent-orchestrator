@@ -337,17 +337,31 @@ describe("getLaunchCommand", () => {
     expect(cmd).toContain("-- '$(rm -rf /); `evil`; $HOME'");
   });
 
-  it("includes -c model_instructions_file when systemPromptFile is set", () => {
+  it("passes systemPromptFile as developer_instructions read by the launch shell", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ systemPromptFile: "/tmp/prompt.md" }));
-    expect(cmd).toContain("-c model_instructions_file='/tmp/prompt.md'");
+    expect(cmd).toContain("-c \"developer_instructions=$(cat '/tmp/prompt.md')\"");
+    expect(cmd).not.toContain("model_instructions_file");
   });
 
   it("prefers systemPromptFile over systemPrompt", () => {
     const cmd = agent.getLaunchCommand(
       makeLaunchConfig({ systemPromptFile: "/tmp/prompt.md", systemPrompt: "Ignored" }),
     );
-    expect(cmd).toContain("model_instructions_file='/tmp/prompt.md'");
+    expect(cmd).toContain("developer_instructions=$(cat '/tmp/prompt.md')");
     expect(cmd).not.toContain("'Ignored'");
+  });
+
+  it("keeps model_instructions_file for systemPromptFile on Windows", () => {
+    mockIsWindows.mockReturnValue(true);
+    try {
+      const cmd = agent.getLaunchCommand(
+        makeLaunchConfig({ systemPromptFile: "C:\\tmp\\prompt.md" }),
+      );
+      expect(cmd).toContain("model_instructions_file=");
+      expect(cmd).not.toContain("developer_instructions");
+    } finally {
+      mockIsWindows.mockReturnValue(false);
+    }
   });
 
   it("includes -c developer_instructions when systemPrompt is set", () => {

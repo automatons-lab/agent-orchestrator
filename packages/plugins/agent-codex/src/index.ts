@@ -613,8 +613,21 @@ function createCodexAgent(): Agent {
       appendModelFlags(parts, config.model);
 
       if (config.systemPromptFile) {
-        // Codex reads developer instructions from a file via config override
-        parts.push("-c", `model_instructions_file=${shellEscape(config.systemPromptFile)}`);
+        if (isWindows()) {
+          // PowerShell launch keeps the upstream file-based override.
+          parts.push("-c", `model_instructions_file=${shellEscape(config.systemPromptFile)}`);
+        } else {
+          // Fork patch: hand the AO prompt to Codex as developer instructions so
+          // Codex keeps its stock base instructions. `model_instructions_file`
+          // replaces them (base_instructions provenance "custom"), which the
+          // Codex config docs strongly discourage. The launch shell reads the
+          // file, so the command stays short and the on-disk prompt is the
+          // single copy for both fresh launches and restores.
+          parts.push(
+            "-c",
+            `"developer_instructions=$(cat ${shellEscape(config.systemPromptFile)})"`,
+          );
+        }
       } else if (config.systemPrompt) {
         // Codex accepts inline developer instructions via config override
         parts.push("-c", `developer_instructions=${shellEscape(config.systemPrompt)}`);
