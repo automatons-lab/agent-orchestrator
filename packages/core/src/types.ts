@@ -872,6 +872,13 @@ export interface SCM {
    */
   requestReviewers?(pr: PRInfo, reviewers: string[]): Promise<void>;
 
+  /**
+   * Submit a review (approve / request changes / comment) with optional inline
+   * comments. `auth.token` scopes the call to a specific identity (the
+   * reviewer) instead of the engine's default login.
+   */
+  submitReview?(pr: PRInfo, review: ReviewSubmission, auth?: SCMAuth): Promise<SubmittedReview>;
+
   /** Get all reviews on a PR */
   getReviews(pr: PRInfo): Promise<Review[]>;
 
@@ -1088,6 +1095,42 @@ export interface Review {
 }
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
+
+/** Review verdict AO submits on behalf of a reviewer identity. */
+export type ReviewSubmissionEvent = "approve" | "request_changes" | "comment";
+
+/** Inline comment attached to a submitted review (GitHub: pulls/:n/reviews comments[]). */
+export interface ReviewSubmissionComment {
+  path: string;
+  /** Line in the diff the comment anchors to (1-based, file line on `side`). */
+  line: number;
+  /** Diff side; defaults to RIGHT (the PR head). */
+  side?: "LEFT" | "RIGHT";
+  /** Optional multi-line anchor start (inclusive). */
+  startLine?: number;
+  body: string;
+}
+
+export interface ReviewSubmission {
+  /** Head SHA the review applies to; the SCM rejects stale reviews when it moves. */
+  commitId?: string;
+  event: ReviewSubmissionEvent;
+  body: string;
+  comments?: ReviewSubmissionComment[];
+}
+
+export interface SubmittedReview {
+  id: number;
+  url?: string;
+  state: string;
+  /** Inline comments the SCM refused (e.g. line outside the diff) and that were folded into the body. */
+  droppedComments?: number;
+}
+
+/** Per-call SCM authentication override (identity token). */
+export interface SCMAuth {
+  token?: string;
+}
 
 export interface ReviewComment {
   id: string;
@@ -1451,6 +1494,8 @@ export interface OrchestratorConfig {
 
   /** Default plugin selections */
   defaults: DefaultPlugins;
+  /** GitHub identities referenced by role `githubUser` fields (fork). */
+  identities?: Record<string, IdentityConfig>;
 
   /** Installer-managed external plugin descriptors */
   plugins?: InstalledPluginConfig[];
@@ -1534,17 +1579,51 @@ export interface DashboardConfig {
   attentionZones?: DashboardAttentionZoneMode;
 }
 
-export interface DefaultPlugins {
+/**
+ * Behaviour fields a project may inherit from `defaults:` (fork: every
+ * non-identity project field). Identity fields (`name`, `path`, `repo`,
+ * `defaultBranch`, `sessionPrefix`) are always per project.
+ */
+export type ProjectBehaviorDefaults = Partial<
+  Pick<
+    ProjectConfig,
+    | "env"
+    | "tracker"
+    | "scm"
+    | "symlinks"
+    | "postCreate"
+    | "agentConfig"
+    | "orchestrator"
+    | "worker"
+    | "reviewer"
+    | "agentRules"
+    | "agentRulesFile"
+    | "branchNameTemplate"
+    | "reviewers"
+    | "orchestratorRules"
+    | "orchestratorSessionStrategy"
+    | "opencodeIssueSessionStrategy"
+  >
+>;
+
+export interface DefaultPlugins extends ProjectBehaviorDefaults {
   runtime: string;
   agent: string;
   workspace: string;
   notifiers: string[];
-  orchestrator?: {
-    agent?: string;
-  };
-  worker?: {
-    agent?: string;
-  };
+}
+
+/**
+ * A GitHub identity AO can act as (fork). Keyed by login under
+ * `identities:`; the token is read from the environment variable `tokenEnv`
+ * and never stored in the config file.
+ */
+export interface IdentityConfig {
+  tokenEnv: string;
+  /** Git author name; defaults to the login. */
+  name?: string;
+  /** Git author email; defaults to `<login>@users.noreply.github.com`. */
+  email?: string;
 }
 
 export type InstalledPluginSource = "registry" | "npm" | "local";
@@ -1570,8 +1649,24 @@ export interface InstalledPluginConfig {
 }
 
 export interface RoleAgentConfig {
+  /** GitHub login (key of `identities:`) this role acts as (fork). */
+  githubUser?: string;
   agent?: string;
   agentConfig?: AgentSpecificConfig;
+}
+
+/** Reviewer role: a role plus the AO-native review loop knobs (fork). */
+export interface ReviewerConfig extends RoleAgentConfig {
+  /** Spawn AO-native reviews for this project. Default false. */
+  enabled?: boolean;
+  /** Wall-clock limit for one review run. Default 25. */
+  timeoutMinutes?: number;
+  /** Reviews running at once across the engine. Default 1. */
+  maxConcurrent?: number;
+  /** `dry-run` writes the review to the run directory without posting. Default `live`. */
+  postMode?: "live" | "dry-run";
+  /** Extra rules appended to the built-in review prompt. */
+  rulesFile?: string;
 }
 
 export interface ProjectConfig {
@@ -1625,6 +1720,9 @@ export interface ProjectConfig {
   orchestrator?: RoleAgentConfig;
 
   worker?: RoleAgentConfig;
+
+  /** AO-native reviewer role (fork). */
+  reviewer?: ReviewerConfig;
 
   /** Per-project reaction overrides */
   reactions?: Record<string, Partial<ReactionConfig>>;
@@ -1690,6 +1788,9 @@ export interface TrackerConfig {
 }
 
 export interface SCMConfig {
+  /** Identity (login from `identities:`) the engine itself uses for SCM API calls (fork). */
+  githubUser?: string;
+
   /**
    * Plugin name (manifest.name). Required when using built-in plugins.
    * Optional when `package` or `path` is specified (will be inferred from manifest).
@@ -1741,6 +1842,8 @@ export interface NotifierConfig {
 export interface AgentSpecificConfig {
   permissions?: AgentPermissionMode;
   model?: string;
+  /** Reasoning effort passed to the agent CLI (codex: model_reasoning_effort, claude: --effort). */
+  reasoningEffort?: string;
   orchestratorModel?: string;
   [key: string]: unknown;
 }

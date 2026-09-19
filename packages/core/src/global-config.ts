@@ -220,10 +220,16 @@ export const GlobalConfigSchema = z
         agent: z.string().default("claude-code"),
         workspace: z.string().default("worktree"),
         notifiers: z.array(z.string()).default(["composio", "desktop"]),
-        orchestrator: z.object({ agent: z.string().optional() }).optional(),
-        worker: z.object({ agent: z.string().optional() }).optional(),
+        // Fork: full role blocks (agent, agentConfig, githubUser, reviewer knobs) and
+        // every other inheritable behaviour field survive a registry save via passthrough.
+        orchestrator: z.object({ agent: z.string().optional() }).passthrough().optional(),
+        worker: z.object({ agent: z.string().optional() }).passthrough().optional(),
+        reviewer: z.object({ agent: z.string().optional() }).passthrough().optional(),
       })
+      .passthrough()
       .default({}),
+    /** Fork: GitHub identities (login → { tokenEnv, name?, email? }). */
+    identities: z.record(z.object({ tokenEnv: z.string() }).passthrough()).optional(),
     /** Project registry — map key is the canonical project ID. */
     projects: z.record(GlobalProjectEntrySchema).default({}),
     /** Optional explicit project ordering for sidebar / portfolio display. */
@@ -311,10 +317,26 @@ export const LocalProjectConfigSchema = z
       .passthrough()
       .optional(),
     orchestrator: z
-      .object({ agent: z.string().optional(), agentConfig: z.object({}).passthrough().optional() })
+      .object({
+        githubUser: z.string().optional(),
+        agent: z.string().optional(),
+        agentConfig: z.object({}).passthrough().optional(),
+      })
       .optional(),
     worker: z
-      .object({ agent: z.string().optional(), agentConfig: z.object({}).passthrough().optional() })
+      .object({
+        githubUser: z.string().optional(),
+        agent: z.string().optional(),
+        agentConfig: z.object({}).passthrough().optional(),
+      })
+      .optional(),
+    reviewer: z
+      .object({
+        githubUser: z.string().optional(),
+        agent: z.string().optional(),
+        agentConfig: z.object({}).passthrough().optional(),
+      })
+      .passthrough()
       .optional(),
     reactions: z.record(z.object({}).passthrough()).optional(),
     agentRules: z.string().optional(),

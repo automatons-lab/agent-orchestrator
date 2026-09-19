@@ -16,7 +16,16 @@ export {
   getDefaultConfig,
   findConfig,
   findConfigFile,
+  mergeConfigValues,
+  DEFAULTABLE_SCALAR_KEYS,
+  DEFAULTABLE_ARRAY_KEYS,
+  DEFAULTABLE_OBJECT_KEYS,
+  DEFAULTABLE_PROJECT_KEYS,
+  PROJECT_ONLY_KEYS,
 } from "./config.js";
+
+// GitHub identities (fork): who each role acts as, engine token, doctor checks
+export * from "./identities.js";
 export { isPortfolioEnabled } from "./feature-flags.js";
 
 // Plugin registry

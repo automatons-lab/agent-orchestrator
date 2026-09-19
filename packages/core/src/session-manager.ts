@@ -69,6 +69,7 @@ import {
   parseCanonicalLifecycle,
 } from "./lifecycle-state.js";
 import { buildPrompt } from "./prompt-builder.js";
+import { roleIdentityEnvironment } from "./identities.js";
 import { classifyActivitySignal, createActivitySignal } from "./activity-signal.js";
 import {
   getProjectSessionsDir,
@@ -1499,6 +1500,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         environment: {
           ...environment,
           ...(opencodeConfigFile ? { OPENCODE_CONFIG: opencodeConfigFile } : {}),
+          // Fork: GH_TOKEN + git author for the worker identity (worker.githubUser).
+          ...roleIdentityEnvironment(config, project, "worker"),
           ...(project.env ?? {}),
           PATH: buildAgentPath(environment["PATH"] ?? process.env["PATH"]),
           GH_PATH: PREFERRED_GH_PATH,
@@ -1968,6 +1971,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         launchCommand,
         environment: {
           ...environment,
+          // Fork: GH_TOKEN + git author for the orchestrator identity (orchestrator.githubUser).
+          ...roleIdentityEnvironment(config, project, "orchestrator"),
           ...(project.env ?? {}),
           PATH: buildAgentPath(environment["PATH"] ?? process.env["PATH"]),
           GH_PATH: PREFERRED_GH_PATH,

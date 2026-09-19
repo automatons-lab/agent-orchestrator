@@ -69,6 +69,11 @@ export interface GhTraceContext {
   projectId?: string;
   sessionId?: SessionId;
   cwd?: string;
+  /**
+   * Extra environment for this single gh invocation (e.g. `GH_TOKEN` of a
+   * configured identity). Merged over process.env; never persisted or traced.
+   */
+  env?: Record<string, string>;
 }
 
 interface GhTraceResult {
@@ -364,6 +369,7 @@ export async function execGhObserved(
     const ghPath = await getGhBinaryPath();
     const { stdout, stderr } = await execFileAsync(ghPath, args, {
       ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
+      ...(ctx.env ? { env: { ...process.env, ...ctx.env } } : {}),
       // 10 MB — matches the previous per-caller maxBuffer in scm-github.
       // GraphQL batch queries for 25 PRs can produce multi-MB responses.
       maxBuffer: 10 * 1024 * 1024,

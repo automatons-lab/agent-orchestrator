@@ -179,6 +179,8 @@ const SCMConfigSchema = z
     plugin: z.string().optional(),
     package: z.string().optional(),
     path: z.string().optional(),
+    /** Identity (login from `identities:`) the engine itself uses for SCM API calls (fork). */
+    githubUser: z.string().optional(),
     webhook: z
       .object({
         enabled: z.boolean().default(true),
@@ -219,6 +221,7 @@ const AgentSpecificConfigSchema = z
   .object({
     permissions: AgentPermissionSchema,
     model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
     orchestratorModel: z.string().optional(),
     opencodeSessionId: z.string().optional(),
   })
@@ -230,23 +233,48 @@ const RoleAgentSpecificConfigSchema = z
       .union([z.enum(["permissionless", "default", "auto-edit", "suggest"]), z.literal("skip")])
       .optional(),
     model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
     orchestratorModel: z.string().optional(),
     opencodeSessionId: z.string().optional(),
   })
   .passthrough();
 
-const RoleAgentDefaultsSchema = z
-  .object({
-    agent: z.string().optional(),
-  })
-  .optional();
+/**
+ * Per-role agent + identity settings. One shape for `worker`, `orchestrator`
+ * and (with extras) `reviewer`, usable both under `defaults:` and per project.
+ * Fork addition: `githubUser` names an entry of the top-level `identities:` map.
+ */
+const RoleConfigSchema = z.object({
+  githubUser: z.string().optional(),
+  agent: z.string().optional(),
+  agentConfig: RoleAgentSpecificConfigSchema.optional(),
+});
 
-const RoleAgentConfigSchema = z
+/** Reviewer role: same as any role plus AO-native review loop knobs (fork). */
+const ReviewerConfigSchema = RoleConfigSchema.extend({
+  enabled: z.boolean().optional(),
+  timeoutMinutes: z.number().int().positive().optional(),
+  maxConcurrent: z.number().int().positive().optional(),
+  postMode: z.enum(["live", "dry-run"]).optional(),
+  rulesFile: z.string().optional(),
+});
+
+/**
+ * GitHub login → how AO obtains its token. Tokens never live in the config
+ * file; `tokenEnv` names the environment variable that carries them.
+ */
+const IdentityConfigSchema = z
   .object({
-    agent: z.string().optional(),
-    agentConfig: RoleAgentSpecificConfigSchema.optional(),
+    tokenEnv: z
+      .string()
+      .min(1, "identities.<login>.tokenEnv must name an environment variable"),
+    name: z.string().optional(),
+    email: z.string().optional(),
   })
-  .optional();
+  .passthrough();
+
+/** GitHub login syntax (alphanumerics and single hyphens, optional [bot] suffix). */
+const IDENTITY_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?(?:\[bot\])?$/;
 
 // Accept either flat string form (`owner/repo`) or the rich object form
 // `{ owner, name, platform?, originUrl? }` that the dashboard auto-writes,
@@ -288,8 +316,9 @@ const ProjectConfigSchema = z.object({
   symlinks: z.array(z.string()).optional(),
   postCreate: z.array(z.string()).optional(),
   agentConfig: AgentSpecificConfigSchema.default({}),
-  orchestrator: RoleAgentConfigSchema,
-  worker: RoleAgentConfigSchema,
+  orchestrator: RoleConfigSchema.optional(),
+  worker: RoleConfigSchema.optional(),
+  reviewer: ReviewerConfigSchema.optional(),
   reactions: z.record(ReactionConfigSchema.partial()).optional(),
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
@@ -302,13 +331,70 @@ const ProjectConfigSchema = z.object({
   opencodeIssueSessionStrategy: z.enum(["reuse", "delete", "ignore"]).optional(),
 });
 
+/**
+ * Project behaviour fields that may be set once under `defaults:` and
+ * inherited by every project (fork). Identity fields (`name`, `path`, `repo`,
+ * `defaultBranch`, `sessionPrefix`) are always per project.
+ */
+export const DEFAULTABLE_SCALAR_KEYS = [
+  "runtime",
+  "agent",
+  "workspace",
+  "agentRules",
+  "agentRulesFile",
+  "branchNameTemplate",
+  "orchestratorRules",
+  "orchestratorSessionStrategy",
+  "opencodeIssueSessionStrategy",
+] as const;
+export const DEFAULTABLE_ARRAY_KEYS = ["symlinks", "postCreate", "reviewers"] as const;
+export const DEFAULTABLE_OBJECT_KEYS = [
+  "env",
+  "tracker",
+  "scm",
+  "agentConfig",
+  "orchestrator",
+  "worker",
+  "reviewer",
+] as const;
+export const DEFAULTABLE_PROJECT_KEYS = [
+  ...DEFAULTABLE_SCALAR_KEYS,
+  ...DEFAULTABLE_ARRAY_KEYS,
+  ...DEFAULTABLE_OBJECT_KEYS,
+] as const;
+export const PROJECT_ONLY_KEYS = [
+  "name",
+  "repo",
+  "path",
+  "defaultBranch",
+  "sessionPrefix",
+  "resolveError",
+  "enabled",
+] as const;
+
 const DefaultPluginsSchema = z.object({
   runtime: z.string().default(() => getDefaultRuntime()),
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default([]),
-  orchestrator: RoleAgentDefaultsSchema,
-  worker: RoleAgentDefaultsSchema,
+  // Role blocks (fork: full role shape incl. agentConfig + githubUser).
+  orchestrator: RoleConfigSchema.optional(),
+  worker: RoleConfigSchema.optional(),
+  reviewer: ReviewerConfigSchema.optional(),
+  // Every other behaviour field a project can inherit (fork).
+  env: ProjectConfigSchema.shape.env,
+  tracker: ProjectConfigSchema.shape.tracker,
+  scm: ProjectConfigSchema.shape.scm,
+  symlinks: ProjectConfigSchema.shape.symlinks,
+  postCreate: ProjectConfigSchema.shape.postCreate,
+  agentConfig: AgentSpecificConfigSchema.optional(),
+  agentRules: ProjectConfigSchema.shape.agentRules,
+  agentRulesFile: ProjectConfigSchema.shape.agentRulesFile,
+  branchNameTemplate: ProjectConfigSchema.shape.branchNameTemplate,
+  reviewers: ProjectConfigSchema.shape.reviewers,
+  orchestratorRules: ProjectConfigSchema.shape.orchestratorRules,
+  orchestratorSessionStrategy: ProjectConfigSchema.shape.orchestratorSessionStrategy,
+  opencodeIssueSessionStrategy: ProjectConfigSchema.shape.opencodeIssueSessionStrategy,
 });
 
 const InstalledPluginConfigSchema = z
@@ -390,6 +476,13 @@ const OrchestratorConfigSchema = z.object({
   lifecycle: LifecycleConfigSchema,
   observability: ObservabilityConfigSchema,
   defaults: DefaultPluginsSchema.default({}),
+  /** GitHub identities referenced by role `githubUser` fields (fork). */
+  identities: z
+    .record(
+      z.string().regex(IDENTITY_LOGIN_RE, "identities keys must be GitHub logins"),
+      IdentityConfigSchema,
+    )
+    .default({}),
   plugins: z.array(InstalledPluginConfigSchema).default([]),
   dashboard: DashboardConfigSchema.optional(),
   projects: z.record(
@@ -610,6 +703,107 @@ function mergeExternalPlugins(
 }
 
 /** Apply defaults to project configs */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cloneConfigValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((v) => cloneConfigValue(v)) as unknown as T;
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = cloneConfigValue(v);
+    return out as T;
+  }
+  return value;
+}
+
+/**
+ * Deep-merge `override` over `base`: plain objects merge key by key, arrays
+ * and primitives from `override` replace, `undefined` overrides are skipped.
+ */
+export function mergeConfigValues<T>(base: T | undefined, override: T | undefined): T | undefined {
+  if (override === undefined) return base === undefined ? undefined : cloneConfigValue(base);
+  if (base === undefined) return cloneConfigValue(override);
+  if (isPlainObject(base) && isPlainObject(override)) {
+    const out: Record<string, unknown> = cloneConfigValue(base);
+    for (const [k, v] of Object.entries(override)) {
+      if (v === undefined) continue;
+      out[k] = isPlainObject(v) && isPlainObject(out[k]) ? mergeConfigValues(out[k], v) : cloneConfigValue(v);
+    }
+    return out as T;
+  }
+  return cloneConfigValue(override);
+}
+
+/**
+ * Inherit behaviour fields from `defaults:` into every project (fork).
+ * Scalars/arrays: project wins when set, else the default. Objects
+ * (`agentConfig`, `worker`, `reviewer`, `scm`, ...): deep-merged, project keys win.
+ * Runs before applyProjectDefaults so inferred scm/tracker plugins still apply
+ * when neither side names one.
+ */
+function applyBehaviorDefaults(config: OrchestratorConfig): OrchestratorConfig {
+  const defaults = (config.defaults ?? {}) as unknown as Record<string, unknown>;
+  if (typeof defaults["agentRulesFile"] === "string") {
+    defaults["agentRulesFile"] = expandHome(defaults["agentRulesFile"] as string);
+  }
+  for (const project of Object.values(config.projects)) {
+    const target = project as unknown as Record<string, unknown>;
+    for (const key of [...DEFAULTABLE_SCALAR_KEYS, ...DEFAULTABLE_ARRAY_KEYS]) {
+      if (target[key] === undefined && defaults[key] !== undefined) {
+        target[key] = cloneConfigValue(defaults[key]);
+      }
+    }
+    for (const key of DEFAULTABLE_OBJECT_KEYS) {
+      const merged = mergeConfigValues(defaults[key], target[key]);
+      if (merged !== undefined) target[key] = merged;
+    }
+    if (typeof target["agentRulesFile"] === "string") {
+      target["agentRulesFile"] = expandHome(target["agentRulesFile"] as string);
+    }
+    const reviewer = target["reviewer"];
+    if (isPlainObject(reviewer) && typeof reviewer["rulesFile"] === "string") {
+      reviewer["rulesFile"] = expandHome(reviewer["rulesFile"]);
+    }
+  }
+  return config;
+}
+
+/**
+ * Every `githubUser` (roles and scm) must name a declared identity, and a
+ * project cannot review its own PRs: worker and enabled reviewer must differ.
+ */
+function validateIdentityReferences(config: OrchestratorConfig): void {
+  const known = Object.keys(config.identities ?? {});
+  const describeKnown = known.length > 0 ? `Declared identities: ${known.join(", ")}` : "No identities are declared under `identities:`";
+  const check = (login: string | undefined, where: string): void => {
+    if (login === undefined) return;
+    if (!known.includes(login)) {
+      throw new Error(
+        `${where} references unknown githubUser "${login}". ${describeKnown}.`,
+      );
+    }
+  };
+  check(config.defaults?.scm?.githubUser, "defaults.scm");
+  for (const role of ["worker", "orchestrator", "reviewer"] as const) {
+    check(config.defaults?.[role]?.githubUser, `defaults.${role}`);
+  }
+  for (const [id, project] of Object.entries(config.projects)) {
+    check(project.scm?.githubUser, `projects.${id}.scm`);
+    for (const role of ["worker", "orchestrator", "reviewer"] as const) {
+      check(project[role]?.githubUser, `projects.${id}.${role}`);
+    }
+    const workerLogin = project.worker?.githubUser;
+    const reviewerLogin = project.reviewer?.githubUser;
+    if (project.reviewer?.enabled && workerLogin !== undefined && workerLogin === reviewerLogin) {
+      throw new Error(
+        `projects.${id}: worker and reviewer use the same githubUser "${workerLogin}"; ` +
+          "GitHub does not allow approving your own pull request, so the reviewer needs a different identity.",
+      );
+    }
+  }
+}
+
 function applyProjectDefaults(config: OrchestratorConfig): OrchestratorConfig {
   for (const [id, project] of Object.entries(config.projects)) {
     // Derive name from project ID if not set
@@ -1032,8 +1226,9 @@ export function loadConfigWithPath(configPath?: string): {
 export function validateConfig(raw: unknown): OrchestratorConfig {
   const validated = OrchestratorConfigSchema.parse(raw);
 
-  let config = validated as OrchestratorConfig;
+  let config = validated as unknown as OrchestratorConfig;
   config = expandPaths(config);
+  config = applyBehaviorDefaults(config);
   config = applyProjectDefaults(config);
   config = applyDefaultReactions(config);
 
@@ -1048,6 +1243,9 @@ export function validateConfig(raw: unknown): OrchestratorConfig {
 
   // Validate project uniqueness and prefix collisions
   validateProjectUniqueness(config);
+
+  // Every role/scm githubUser must name a declared identity (fork)
+  validateIdentityReferences(config);
 
   return config;
 }
