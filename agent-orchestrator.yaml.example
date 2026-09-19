@@ -32,15 +32,42 @@ port: 3000
 
 # Default plugins (these are the defaults — you can omit this section)
 # runtime defaults to 'tmux' on Linux/macOS, 'process' on Windows
+# GitHub identities AO can act as (fork). Keyed by login; the token is read
+# from the named environment variable and never stored in this file. Roles
+# (`worker`, `orchestrator`, `reviewer`) and `scm.githubUser` refer to these.
+# identities:
+#   neo-automaton:     { tokenEnv: NEO_GITHUB_TOKEN }
+#   trinity-automaton: { tokenEnv: TRINITY_GITHUB_TOKEN, email: trinity@example.com }
+
 defaults:
   # runtime: tmux         # tmux (Linux/macOS default) | process (Windows default)
   agent: claude-code      # claude-code | codex | aider | opencode | cursor | kimicode
-  # orchestrator:
-  #   agent: claude-code
-  # worker:
-  #   agent: codex
   workspace: worktree     # worktree | clone
   notifiers: [desktop]    # desktop | slack | discord | webhook | composio | openclaw
+  # Every project behaviour field may be set here once and overridden per
+  # project: objects (agentConfig, worker, orchestrator, reviewer, scm, tracker,
+  # env) deep-merge with project keys winning; scalars and arrays (postCreate,
+  # symlinks, reviewers) are replaced by the project value. Identity fields
+  # (name, path, repo, defaultBranch, sessionPrefix) are always per project.
+  # agentRulesFile: ~/.agent-orchestrator/rules/coder.md
+  # branchNameTemplate: "{issue}.{slug}"
+  # scm:
+  #   plugin: github
+  #   githubUser: neo-automaton       # identity the engine itself calls GitHub as
+  # worker:
+  #   githubUser: neo-automaton       # GH_TOKEN + git author for worker sessions
+  #   agent: codex
+  #   agentConfig: { model: gpt-6-astra, reasoningEffort: xhigh, permissions: permissionless }
+  # orchestrator:
+  #   agent: claude-code
+  # reviewer:                         # AO-native reviewer (must differ from worker identity)
+  #   githubUser: trinity-automaton
+  #   agent: codex
+  #   agentConfig: { model: gpt-6-astra, reasoningEffort: xhigh }
+  #   enabled: false                  # true = AO spawns reviews itself
+  #   timeoutMinutes: 25
+  #   maxConcurrent: 1
+  #   postMode: live                  # live | dry-run
 
 # Installer-managed external plugins (optional)
 # plugins:

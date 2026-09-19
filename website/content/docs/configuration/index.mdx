@@ -115,11 +115,25 @@ See [Projects](/docs/configuration/projects) for the full project behavior refer
 You can set defaults that apply across all registered projects in the global registry:
 
 ```yaml title="~/.agent-orchestrator/config.yaml"
+identities:
+  neo-automaton: { tokenEnv: NEO_GITHUB_TOKEN }
+  trinity-automaton: { tokenEnv: TRINITY_GITHUB_TOKEN }
+
 defaults:
   agent: claude-code
   runtime: tmux
   workspace: worktree
   notifiers: [desktop]
+  agentRulesFile: ~/.agent-orchestrator/rules/coder.md
+  scm: { plugin: github, githubUser: neo-automaton }
+  worker:
+    githubUser: neo-automaton
+    agent: codex
+    agentConfig: { model: gpt-6-astra, reasoningEffort: xhigh, permissions: permissionless }
+  reviewer:
+    githubUser: trinity-automaton
+    agent: codex
+    agentConfig: { model: gpt-6-astra, reasoningEffort: xhigh }
 
 notificationRouting:
   urgent: [desktop, composio]
@@ -128,7 +142,19 @@ notificationRouting:
   info: [composio]
 ```
 
-Project-local values override global defaults.
+Every project behaviour field can live under `defaults:` and be overridden per project. Objects (`agentConfig`, `worker`, `orchestrator`, `reviewer`, `scm`, `tracker`, `env`) deep-merge with project keys winning; scalars and arrays (`postCreate`, `symlinks`, `reviewers`) are replaced by the project value. Identity fields (`name`, `path`, `repo`, `defaultBranch`, `sessionPrefix`) are always per project.
+
+`ao config show` prints the effective config after inheritance; `ao config normalize` hoists values that every project repeats into `defaults:` (use `--write` to apply, a `.bak` copy is kept).
+
+### Identities
+
+`identities:` maps a GitHub login to the environment variable that holds its token; tokens never live in the file. Roles name one of those logins with `githubUser`:
+
+- `worker.githubUser` / `orchestrator.githubUser` — the session gets `GH_TOKEN` plus `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so PRs and commits carry that identity without `git config` steps in `postCreate`.
+- `scm.githubUser` (under `defaults`) — the identity the engine itself uses for GitHub API calls (`GH_TOKEN` is exported at `ao start`).
+- `reviewer.githubUser` — the identity AO posts reviews as; it must differ from the worker identity when the reviewer is enabled, because GitHub rejects self-approval.
+
+`ao start` refuses to run when a referenced identity has no token in the environment; `ao doctor` verifies that each token really belongs to its login.
 
 ## Config Lookup
 

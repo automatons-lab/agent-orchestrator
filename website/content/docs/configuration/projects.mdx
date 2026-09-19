@@ -158,6 +158,8 @@ worker:
 
 Use this when planning/review needs a stronger model but routine implementation can use a faster or cheaper worker.
 
+Each role block also takes `githubUser` (a login declared under top-level `identities:`) and `agentConfig.reasoningEffort` (Codex `model_reasoning_effort`, Claude `--effort`). A third role, `reviewer`, configures the AO-native review loop and must use a different identity than `worker`. Role blocks are usually set once under `defaults:` and only overridden per project — see [Global Defaults](/docs/configuration#global-defaults).
+
 ## Tracker And SCM
 
 AO usually infers tracker and SCM from the registered repository. Override them only when needed.

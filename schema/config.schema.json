@@ -5,7 +5,9 @@
   "description": "Schema for agent-orchestrator.yaml.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["projects"],
+  "required": [
+    "projects"
+  ],
   "properties": {
     "$schema": {
       "type": "string",
@@ -83,6 +85,35 @@
       "additionalProperties": {
         "$ref": "#/$defs/reactionConfig"
       }
+    },
+    "identities": {
+      "type": "object",
+      "description": "GitHub identities AO can act as, keyed by login. Tokens are read from the named environment variable and never stored here.",
+      "propertyNames": {
+        "pattern": "^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?(?:\\[bot\\])?$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "tokenEnv": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Environment variable holding this login's token."
+          },
+          "name": {
+            "type": "string",
+            "description": "Git author name (defaults to the login)."
+          },
+          "email": {
+            "type": "string",
+            "description": "Git author email (defaults to <login>@users.noreply.github.com)."
+          }
+        },
+        "required": [
+          "tokenEnv"
+        ],
+        "additionalProperties": true
+      }
     }
   },
   "$defs": {
@@ -96,7 +127,11 @@
         },
         "action": {
           "type": "string",
-          "enum": ["send-to-agent", "notify", "auto-merge"],
+          "enum": [
+            "send-to-agent",
+            "notify",
+            "auto-merge"
+          ],
           "default": "notify"
         },
         "message": {
@@ -104,7 +139,12 @@
         },
         "priority": {
           "type": "string",
-          "enum": ["urgent", "action", "warning", "info"]
+          "enum": [
+            "urgent",
+            "action",
+            "warning",
+            "info"
+          ]
         },
         "retries": {
           "type": "number"
@@ -144,9 +184,28 @@
           "description": "Local path for an external tracker plugin."
         }
       },
-      "anyOf": [{ "required": ["plugin"] }, { "required": ["package"] }, { "required": ["path"] }],
+      "anyOf": [
+        {
+          "required": [
+            "plugin"
+          ]
+        },
+        {
+          "required": [
+            "package"
+          ]
+        },
+        {
+          "required": [
+            "path"
+          ]
+        }
+      ],
       "not": {
-        "required": ["package", "path"]
+        "required": [
+          "package",
+          "path"
+        ]
       }
     },
     "scmWebhookConfig": {
@@ -196,11 +255,34 @@
         },
         "webhook": {
           "$ref": "#/$defs/scmWebhookConfig"
+        },
+        "githubUser": {
+          "type": "string",
+          "description": "Identity (key of top-level identities) the engine itself uses for SCM API calls."
         }
       },
-      "anyOf": [{ "required": ["plugin"] }, { "required": ["package"] }, { "required": ["path"] }],
+      "anyOf": [
+        {
+          "required": [
+            "plugin"
+          ]
+        },
+        {
+          "required": [
+            "package"
+          ]
+        },
+        {
+          "required": [
+            "path"
+          ]
+        }
+      ],
       "not": {
-        "required": ["package", "path"]
+        "required": [
+          "package",
+          "path"
+        ]
       }
     },
     "notifierConfig": {
@@ -220,14 +302,39 @@
           "description": "Local path for an external notifier plugin."
         }
       },
-      "anyOf": [{ "required": ["plugin"] }, { "required": ["package"] }, { "required": ["path"] }],
+      "anyOf": [
+        {
+          "required": [
+            "plugin"
+          ]
+        },
+        {
+          "required": [
+            "package"
+          ]
+        },
+        {
+          "required": [
+            "path"
+          ]
+        }
+      ],
       "not": {
-        "required": ["package", "path"]
+        "required": [
+          "package",
+          "path"
+        ]
       }
     },
     "agentPermission": {
       "type": "string",
-      "enum": ["permissionless", "default", "auto-edit", "suggest", "skip"],
+      "enum": [
+        "permissionless",
+        "default",
+        "auto-edit",
+        "suggest",
+        "skip"
+      ],
       "default": "permissionless"
     },
     "agentSpecificConfig": {
@@ -245,6 +352,10 @@
         },
         "opencodeSessionId": {
           "type": "string"
+        },
+        "reasoningEffort": {
+          "type": "string",
+          "description": "Reasoning effort passed to the agent CLI (codex: model_reasoning_effort; claude: --effort)."
         }
       }
     },
@@ -284,13 +395,19 @@
         },
         "agentConfig": {
           "$ref": "#/$defs/roleAgentSpecificConfig"
+        },
+        "githubUser": {
+          "type": "string",
+          "description": "GitHub login (key of top-level identities) this role acts as."
         }
       }
     },
     "projectConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path"],
+      "required": [
+        "path"
+      ],
       "properties": {
         "name": {
           "type": "string"
@@ -376,11 +493,39 @@
         },
         "orchestratorSessionStrategy": {
           "type": "string",
-          "enum": ["reuse", "delete", "ignore", "delete-new", "ignore-new", "kill-previous"]
+          "enum": [
+            "reuse",
+            "delete",
+            "ignore",
+            "delete-new",
+            "ignore-new",
+            "kill-previous"
+          ]
         },
         "opencodeIssueSessionStrategy": {
           "type": "string",
-          "enum": ["reuse", "delete", "ignore"]
+          "enum": [
+            "reuse",
+            "delete",
+            "ignore"
+          ]
+        },
+        "reviewer": {
+          "$ref": "#/$defs/reviewerConfig"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment variables forwarded to agent sessions."
+        },
+        "reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "GitHub logins to request as reviewers on every new head SHA."
         }
       }
     },
@@ -411,24 +556,102 @@
           }
         },
         "orchestrator": {
-          "$ref": "#/$defs/roleAgentDefaults"
+          "$ref": "#/$defs/roleAgentConfig"
         },
         "worker": {
-          "$ref": "#/$defs/roleAgentDefaults"
+          "$ref": "#/$defs/roleAgentConfig"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/reviewerConfig"
+        },
+        "tracker": {
+          "$ref": "#/$defs/trackerConfig"
+        },
+        "scm": {
+          "$ref": "#/$defs/scmConfig"
+        },
+        "symlinks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "postCreate": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "agentConfig": {
+          "$ref": "#/$defs/agentSpecificConfig"
+        },
+        "agentRules": {
+          "type": "string"
+        },
+        "agentRulesFile": {
+          "type": "string"
+        },
+        "branchNameTemplate": {
+          "type": "string",
+          "description": "Template for issue-derived branch names. Placeholders: {issue} (issue number), {slug} (slugified issue title, lowercase, max 40 chars). Example: \"{issue}.{slug}\" -> \"36.expose-window-message-ids\". When unset, trackers fall back to their built-in default (e.g. \"feat/issue-N\")."
+        },
+        "orchestratorRules": {
+          "type": "string"
+        },
+        "orchestratorSessionStrategy": {
+          "type": "string",
+          "enum": [
+            "reuse",
+            "delete",
+            "ignore",
+            "delete-new",
+            "ignore-new",
+            "kill-previous"
+          ]
+        },
+        "opencodeIssueSessionStrategy": {
+          "type": "string",
+          "enum": [
+            "reuse",
+            "delete",
+            "ignore"
+          ]
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment variables forwarded to agent sessions."
+        },
+        "reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "GitHub logins to request as reviewers on every new head SHA."
         }
-      }
+      },
+      "description": "Defaults inherited by every project. Any behaviour field of a project may be set here once; identity fields (name, path, repo, defaultBranch, sessionPrefix) stay per project. Objects deep-merge (project keys win); scalars and arrays are replaced by the project value."
     },
     "installedPluginConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "source"],
+      "required": [
+        "name",
+        "source"
+      ],
       "properties": {
         "name": {
           "type": "string"
         },
         "source": {
           "type": "string",
-          "enum": ["registry", "npm", "local"]
+          "enum": [
+            "registry",
+            "npm",
+            "local"
+          ]
         },
         "package": {
           "type": "string"
@@ -452,28 +675,42 @@
                 "const": "local"
               }
             },
-            "required": ["source"]
+            "required": [
+              "source"
+            ]
           },
           "then": {
-            "required": ["path"]
+            "required": [
+              "path"
+            ]
           }
         },
         {
           "if": {
             "properties": {
               "source": {
-                "enum": ["registry", "npm"]
+                "enum": [
+                  "registry",
+                  "npm"
+                ]
               }
             },
-            "required": ["source"]
+            "required": [
+              "source"
+            ]
           },
           "then": {
-            "required": ["package"]
+            "required": [
+              "package"
+            ]
           }
         },
         {
           "not": {
-            "required": ["package", "path"]
+            "required": [
+              "package",
+              "path"
+            ]
           }
         }
       ]
@@ -493,7 +730,10 @@
       "properties": {
         "attentionZones": {
           "type": "string",
-          "enum": ["simple", "detailed"],
+          "enum": [
+            "simple",
+            "detailed"
+          ],
           "default": "simple"
         }
       }
@@ -526,7 +766,12 @@
       "properties": {
         "logLevel": {
           "type": "string",
-          "enum": ["debug", "info", "warn", "error"],
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
           "default": "warn"
         },
         "stderr": {
@@ -570,6 +815,49 @@
           "type": "string"
         }
       }
+    },
+    "reviewerConfig": {
+      "type": "object",
+      "description": "AO-native reviewer role: a role block plus review-loop settings.",
+      "properties": {
+        "githubUser": {
+          "type": "string",
+          "description": "GitHub login (key of top-level identities) the review is posted as. Must differ from the worker identity when enabled."
+        },
+        "agent": {
+          "type": "string"
+        },
+        "agentConfig": {
+          "$ref": "#/$defs/agentSpecificConfig"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "timeoutMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 25
+        },
+        "maxConcurrent": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "postMode": {
+          "type": "string",
+          "enum": [
+            "live",
+            "dry-run"
+          ],
+          "default": "live"
+        },
+        "rulesFile": {
+          "type": "string",
+          "description": "Extra rules appended to the built-in review prompt."
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
