@@ -29,8 +29,11 @@ import {
   type Review,
   type ReviewDecision,
   type ReviewComment,
+  type ReviewSubmission,
   type ReviewSummary,
   type ReviewThreadsResult,
+  type SCMAuth,
+  type SubmittedReview,
   type MergeReadiness,
   type PREnrichmentData,
   type BatchObserver,
@@ -139,6 +142,74 @@ function prInfoFromView(
 function isUnsupportedPrChecksJsonError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return /pr checks/i.test(err.message) && /unknown json field/i.test(err.message);
+}
+
+/**
+ * `gh pr checks` exits 1 with "no checks reported on the '<branch>' branch"
+ * when the repository has no CI at all. That is an empty check list, not a
+ * failure to fetch — treating it as fail-closed would mark every CI-less PR
+ * as failing and block reviewer routing.
+ */
+function isNoChecksReportedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { message?: unknown; stderr?: unknown; stdout?: unknown; code?: unknown };
+  if (typeof e.code === "number" && e.code !== 1) return false;
+  const text = [e.message, e.stderr, e.stdout]
+    .filter((v): v is string => typeof v === "string")
+    .join("\n");
+  return /no checks reported/i.test(text);
+}
+
+/**
+ * Run `gh` with a JSON body on stdin (`--input -`) and optional per-call
+ * environment (e.g. an identity `GH_TOKEN`). Kept off `execGhObserved` so the
+ * body never reaches argv or the trace; process.env is never mutated.
+ */
+async function ghWithStdin(
+  args: string[],
+  stdin: string,
+  env?: Record<string, string>,
+): Promise<string> {
+  const pending = execFileAsync("gh", args, {
+    ...(env ? { env: { ...process.env, ...env } } : {}),
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 30_000,
+  }) as Promise<{ stdout: string; stderr: string }> & {
+    child?: { stdin?: { end: (data: string) => void } | null };
+  };
+  try {
+    pending.child?.stdin?.end(stdin);
+  } catch {
+    // EPIPE etc. — the awaited promise below surfaces the real failure.
+  }
+  const { stdout } = await pending;
+  return stdout.trim();
+}
+
+function extractHttpStatus(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const e = err as { message?: unknown; stderr?: unknown };
+  const text = [e.message, e.stderr].filter((v): v is string => typeof v === "string").join("\n");
+  const m = text.match(/HTTP (\d{3})/);
+  return m ? Number(m[1]) : undefined;
+}
+
+/** 422 caused by an inline comment anchored outside the PR diff. */
+function isReviewCommentPositionError(err: unknown): boolean {
+  if (extractHttpStatus(err) !== 422) return false;
+  const e = err as { message?: unknown; stderr?: unknown; stdout?: unknown };
+  const text = [e.message, e.stderr, e.stdout]
+    .filter((v): v is string => typeof v === "string")
+    .join("\n");
+  return /line|diff|position/i.test(text);
+}
+
+function firstStderrLine(err: unknown): string {
+  if (!err || typeof err !== "object") return String(err);
+  const e = err as { message?: unknown; stderr?: unknown };
+  const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
+  if (stderr) return stderr.split("\n")[0] ?? stderr;
+  return typeof e.message === "string" ? (e.message.split("\n")[0] ?? e.message) : String(err);
 }
 
 function mapRawCheckStateToStatus(rawState: string | undefined): CICheck["status"] {
@@ -888,6 +959,9 @@ function createGitHubSCM(): SCM {
             };
           });
         } catch (err) {
+          if (isNoChecksReportedError(err)) {
+            return [];
+          }
           if (isUnsupportedPrChecksJsonError(err)) {
             return getCIChecksFromStatusRollup(pr);
           }
@@ -1043,6 +1117,85 @@ function createGitHubSCM(): SCM {
         );
       }
       invalidatePRCache(pr);
+    },
+
+    async submitReview(
+      pr: PRInfo,
+      review: ReviewSubmission,
+      auth?: SCMAuth,
+    ): Promise<SubmittedReview> {
+      const eventMap = {
+        approve: "APPROVE",
+        request_changes: "REQUEST_CHANGES",
+        comment: "COMMENT",
+      } as const;
+      const args = [
+        "api",
+        "-X",
+        "POST",
+        `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`,
+        "--input",
+        "-",
+      ];
+      // Token scoped to this call only (identity of the reviewer), never process.env.
+      const env = auth?.token ? { GH_TOKEN: auth.token } : undefined;
+      const comments = (review.comments ?? []).map((c) => {
+        const side = c.side ?? "RIGHT";
+        return {
+          path: c.path,
+          line: c.line,
+          side,
+          ...(c.startLine !== undefined ? { start_line: c.startLine, start_side: side } : {}),
+          body: c.body,
+        };
+      });
+      const buildBody = (body: string, withComments: boolean): string =>
+        JSON.stringify({
+          ...(review.commitId ? { commit_id: review.commitId } : {}),
+          event: eventMap[review.event],
+          body,
+          ...(withComments && comments.length > 0 ? { comments } : {}),
+        });
+      const parse = (raw: string): { id: number; html_url?: string; state: string } =>
+        JSON.parse(raw) as { id: number; html_url?: string; state: string };
+      const fail = (err: unknown): never => {
+        const status = extractHttpStatus(err);
+        throw new Error(
+          `submitReview(${pr.owner}/${pr.repo}#${pr.number}) failed` +
+            (status ? ` (HTTP ${status})` : "") +
+            `: ${firstStderrLine(err)}`,
+          { cause: err },
+        );
+      };
+
+      let raw: string;
+      let droppedComments = 0;
+      try {
+        raw = await ghWithStdin(args, buildBody(review.body, true), env);
+      } catch (err) {
+        // GitHub rejects inline comments anchored outside the diff with 422.
+        // Retry once without them and fold the notes into the review body so
+        // the feedback is not lost.
+        if (comments.length === 0 || !isReviewCommentPositionError(err)) {
+          return fail(err);
+        }
+        const notes = comments.map((c) => `- \`${c.path}:${c.line}\` — ${c.body}`).join("\n");
+        const body = `${review.body}\n\n### Notes on lines outside the diff\n\n${notes}`;
+        try {
+          raw = await ghWithStdin(args, buildBody(body, false), env);
+        } catch (retryErr) {
+          return fail(retryErr);
+        }
+        droppedComments = comments.length;
+      }
+      const data = parse(raw);
+      invalidatePRCache(pr);
+      return {
+        id: data.id,
+        url: data.html_url,
+        state: data.state,
+        ...(droppedComments > 0 ? { droppedComments } : {}),
+      };
     },
 
     async getReviews(pr: PRInfo): Promise<Review[]> {

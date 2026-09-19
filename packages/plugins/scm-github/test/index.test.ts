@@ -92,6 +92,27 @@ function mockGhError(msg = "Command failed") {
   ghMock.mockRejectedValueOnce(new Error(msg));
 }
 
+/** Reject like a real execFile failure: message + stderr/stdout + exit code. */
+function mockGhExecError(stderr: string, opts: { code?: number; stdout?: string } = {}) {
+  const err = Object.assign(new Error(`Command failed: gh\n${stderr}`), {
+    stderr,
+    stdout: opts.stdout ?? "",
+    code: opts.code ?? 1,
+  });
+  ghMock.mockRejectedValueOnce(err);
+}
+
+/**
+ * Resolve like promisify(execFile): the returned promise carries `.child`, and
+ * the plugin writes its JSON body to `child.stdin.end(...)`. Captures the body.
+ */
+function mockGhWithStdin(result: unknown, stdinSink: { end: ReturnType<typeof vi.fn> }) {
+  ghMock.mockImplementationOnce(() => {
+    const p = Promise.resolve({ stdout: JSON.stringify(result), stderr: "" });
+    return Object.assign(p, { child: { stdin: stdinSink } });
+  });
+}
+
 function makeWebhookRequest(overrides: Partial<SCMWebhookRequest> = {}): SCMWebhookRequest {
   return {
     method: "POST",
@@ -640,6 +661,16 @@ describe("scm-github plugin", () => {
       expect(await scm.getCIChecks(pr)).toEqual([]);
     });
 
+    it('treats gh "no checks reported" (exit 1) as an empty check list', async () => {
+      mockGhExecError("no checks reported on the 'feat/my-feature' branch", { code: 1 });
+      expect(await scm.getCIChecks(pr)).toEqual([]);
+    });
+
+    it('still fails closed when "no checks reported" comes with a non-1 exit code', async () => {
+      mockGhExecError("no checks reported on the 'feat/my-feature' branch", { code: 2 });
+      await expect(scm.getCIChecks(pr)).rejects.toThrow("Failed to fetch CI checks");
+    });
+
     it("handles missing optional fields gracefully", async () => {
       mockGh([{ name: "test", state: "SUCCESS" }]);
       const checks = await scm.getCIChecks(pr);
@@ -792,6 +823,25 @@ describe("scm-github plugin", () => {
       expect(await scm.getCISummary(pr)).toBe("failing");
     });
 
+    it('returns "none" when the repo has no checks at all and does not fail closed', async () => {
+      mockGhExecError("no checks reported on the 'feat/my-feature' branch", { code: 1 });
+      expect(await scm.getCISummary(pr)).toBe("none");
+      const failClosedCalls = recordActivityEventMock.mock.calls.filter(
+        ([event]) => event.kind === "scm.ci_summary_failclosed",
+      );
+      expect(failClosedCalls).toHaveLength(0);
+    });
+
+    it('returns "failing" for other gh failures (fail-closed) and emits the event', async () => {
+      mockGhExecError("gh: Bad credentials (HTTP 401)", { code: 1 });
+      mockGhError("state failed");
+      expect(await scm.getCISummary(pr)).toBe("failing");
+      const failClosedCalls = recordActivityEventMock.mock.calls.filter(
+        ([event]) => event.kind === "scm.ci_summary_failclosed",
+      );
+      expect(failClosedCalls).toHaveLength(1);
+    });
+
     it("dedupes fail-closed activity events per PR", async () => {
       mockGhError("checks failed");
       mockGhError("state failed");
@@ -826,6 +876,146 @@ describe("scm-github plugin", () => {
         { name: "b", state: "NEUTRAL" },
       ]);
       expect(await scm.getCISummary(pr)).toBe("none");
+    });
+  });
+
+  // ---- submitReview ------------------------------------------------------
+
+  describe("submitReview", () => {
+    const reviewsPath = "repos/acme/repo/pulls/42/reviews";
+    const expectedArgs = ["api", "-X", "POST", reviewsPath, "--input", "-"];
+
+    function lastCall() {
+      const call = ghMock.mock.calls[ghMock.mock.calls.length - 1];
+      return { bin: call[0] as string, args: call[1] as string[], opts: call[2] as Record<string, unknown> };
+    }
+
+    it("posts an APPROVE review via stdin without touching env when no token is given", async () => {
+      const sink = { end: vi.fn() };
+      mockGhWithStdin({ id: 7, html_url: "https://github.com/acme/repo/pull/42#pullrequestreview-7", state: "APPROVED" }, sink);
+
+      const result = await scm.submitReview!(pr, { commitId: "abc123", event: "approve", body: "LGTM" });
+
+      const { bin, args, opts } = lastCall();
+      expect(bin).toBe("gh");
+      expect(args).toEqual(expectedArgs);
+      expect(opts.env).toBeUndefined();
+      expect(sink.end).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(sink.end.mock.calls[0][0] as string)).toEqual({
+        commit_id: "abc123",
+        event: "APPROVE",
+        body: "LGTM",
+      });
+      expect(result).toEqual({
+        id: 7,
+        url: "https://github.com/acme/repo/pull/42#pullrequestreview-7",
+        state: "APPROVED",
+      });
+    });
+
+    it("maps REQUEST_CHANGES with inline comments and scopes GH_TOKEN to the call", async () => {
+      const sink = { end: vi.fn() };
+      mockGhWithStdin({ id: 8, html_url: "u", state: "CHANGES_REQUESTED" }, sink);
+      const before = process.env["GH_TOKEN"];
+
+      await scm.submitReview!(
+        pr,
+        {
+          commitId: "abc123",
+          event: "request_changes",
+          body: "Please fix",
+          comments: [
+            { path: "src/a.ts", line: 10, body: "bug here" },
+            { path: "src/b.ts", line: 20, startLine: 18, side: "LEFT", body: "old code" },
+          ],
+        },
+        { token: "tok-123" },
+      );
+
+      const { opts } = lastCall();
+      const env = opts.env as Record<string, string>;
+      expect(env.GH_TOKEN).toBe("tok-123");
+      expect(env.PATH).toBe(process.env["PATH"]);
+      expect(process.env["GH_TOKEN"]).toBe(before);
+      expect(JSON.parse(sink.end.mock.calls[0][0] as string)).toEqual({
+        commit_id: "abc123",
+        event: "REQUEST_CHANGES",
+        body: "Please fix",
+        comments: [
+          { path: "src/a.ts", line: 10, side: "RIGHT", body: "bug here" },
+          { path: "src/b.ts", line: 20, side: "LEFT", start_line: 18, start_side: "LEFT", body: "old code" },
+        ],
+      });
+    });
+
+    it("maps comment event to COMMENT", async () => {
+      const sink = { end: vi.fn() };
+      mockGhWithStdin({ id: 9, state: "COMMENTED" }, sink);
+      const result = await scm.submitReview!(pr, { event: "comment", body: "fyi" });
+      expect(JSON.parse(sink.end.mock.calls[0][0] as string)).toEqual({ event: "COMMENT", body: "fyi" });
+      expect(result).toEqual({ id: 9, url: undefined, state: "COMMENTED" });
+    });
+
+    it("retries without inline comments on a 422 diff-position error and folds them into the body", async () => {
+      mockGhExecError(
+        "gh: Pull request review thread line must be part of the diff (HTTP 422)",
+        { code: 1 },
+      );
+      const sink = { end: vi.fn() };
+      mockGhWithStdin({ id: 10, html_url: "u", state: "CHANGES_REQUESTED" }, sink);
+
+      const result = await scm.submitReview!(
+        pr,
+        {
+          commitId: "abc123",
+          event: "request_changes",
+          body: "Please fix",
+          comments: [
+            { path: "src/a.ts", line: 10, body: "bug here" },
+            { path: "src/b.ts", line: 20, body: "another" },
+          ],
+        },
+        { token: "tok-123" },
+      );
+
+      expect(ghMock).toHaveBeenCalledTimes(2);
+      expect(lastCall().args).toEqual(expectedArgs);
+      const retryBody = JSON.parse(sink.end.mock.calls[0][0] as string);
+      expect(retryBody.comments).toBeUndefined();
+      expect(retryBody.event).toBe("REQUEST_CHANGES");
+      expect(retryBody.body).toContain("Please fix");
+      expect(retryBody.body).toContain("### Notes on lines outside the diff");
+      expect(retryBody.body).toContain("- `src/a.ts:10` — bug here");
+      expect(retryBody.body).toContain("- `src/b.ts:20` — another");
+      expect(result.droppedComments).toBe(2);
+      expect(result.id).toBe(10);
+    });
+
+    it("does not retry a 422 that is unrelated to comment positions", async () => {
+      mockGhExecError("gh: Validation Failed: Can not approve your own pull request (HTTP 422)", {
+        code: 1,
+      });
+      await expect(
+        scm.submitReview!(pr, {
+          event: "approve",
+          body: "secret-body-text",
+          comments: [{ path: "src/a.ts", line: 1, body: "x" }],
+        }),
+      ).rejects.toThrow(/submitReview\(acme\/repo#42\) failed \(HTTP 422\)/);
+      expect(ghMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("throws with the HTTP status on other failures and keeps the body out of the message", async () => {
+      mockGhExecError("gh: Not Found (HTTP 404)", { code: 1 });
+      let thrown: Error | undefined;
+      try {
+        await scm.submitReview!(pr, { event: "comment", body: "secret-body-text" });
+      } catch (err) {
+        thrown = err as Error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown?.message).toMatch(/HTTP 404/);
+      expect(thrown?.message).not.toContain("secret-body-text");
     });
   });
 
