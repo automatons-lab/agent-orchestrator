@@ -13,8 +13,9 @@ import {
 } from "@aoagents/ao-core";
 import type * as AoCore from "@aoagents/ao-core";
 
-const { mockConfigRef, mockSessionManager, reviewStoreRootRef } = vi.hoisted(() => ({
+const { mockConfigRef, mockSessionManager, mockRuntimeDestroy, reviewStoreRootRef } = vi.hoisted(() => ({
   mockConfigRef: { current: null as OrchestratorConfig | null },
+  mockRuntimeDestroy: vi.fn(),
   mockSessionManager: {
     get: vi.fn(),
     list: vi.fn(),
@@ -80,6 +81,9 @@ vi.mock("@aoagents/ao-core", async (importOriginal) => {
 
 vi.mock("../../src/lib/create-session-manager.js", () => ({
   getSessionManager: async (): Promise<SessionManager> => mockSessionManager as SessionManager,
+  getPluginRegistry: async () => ({
+    get: () => ({ destroy: mockRuntimeDestroy }),
+  }),
 }));
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -189,6 +193,8 @@ beforeEach(() => {
   mockSessionManager.get.mockResolvedValue(makeSession({ workspacePath: appPath }));
   mockSessionManager.list.mockReset();
   mockSessionManager.send.mockReset();
+  mockRuntimeDestroy.mockReset();
+  mockRuntimeDestroy.mockResolvedValue(undefined);
 
   createCodeReviewStore("app").deleteAll();
   createCodeReviewStore("docs").deleteAll();
@@ -237,6 +243,70 @@ describe("review command", () => {
       linkedSessionId: "app-1",
       reviewerSessionId: "app-rev-1",
     });
+  });
+
+  it("cancels an active review run and tears down its tmux session", async () => {
+    await program.parseAsync(["node", "test", "review", "run", "app-1", "--json"]);
+    const store = createCodeReviewStore("app");
+    const queued = store.listRuns()[0]!;
+    store.updateRun(queued.id, { status: "running", tmuxName: "app-rev-1" });
+
+    consoleLogSpy.mockClear();
+    await program.parseAsync(["node", "test", "review", "cancel", "app-rev-1", "--json"]);
+
+    const payload = JSON.parse(String(consoleLogSpy.mock.calls.at(-1)?.[0])) as {
+      run: { status: string; terminationReason?: string; completedAt?: string };
+      runtimeError: string | null;
+    };
+    expect(payload.run).toMatchObject({
+      status: "cancelled",
+      terminationReason: "cancelled from CLI",
+    });
+    expect(payload.run.completedAt).toBeTruthy();
+    expect(payload.runtimeError).toBeNull();
+    expect(mockRuntimeDestroy).toHaveBeenCalledWith({
+      id: "app-rev-1",
+      runtimeName: "tmux",
+      data: {},
+    });
+    expect(store.getRun(queued.id)?.status).toBe("cancelled");
+  });
+
+  it("refuses to cancel a run that is already terminal", async () => {
+    await program.parseAsync(["node", "test", "review", "run", "app-1", "--json"]);
+    const store = createCodeReviewStore("app");
+    const run = store.listRuns()[0]!;
+    store.updateRun(run.id, { status: "clean" });
+
+    await expect(
+      program.parseAsync(["node", "test", "review", "cancel", run.id]),
+    ).rejects.toThrow("process.exit(1)");
+    expect(mockRuntimeDestroy).not.toHaveBeenCalled();
+    expect(store.getRun(run.id)?.status).toBe("clean");
+  });
+
+  it("shows native review details in the list output", async () => {
+    await program.parseAsync(["node", "test", "review", "run", "app-1", "--json"]);
+    const store = createCodeReviewStore("app");
+    const run = store.listRuns()[0]!;
+    store.updateRun(run.id, {
+      verdict: "request_changes",
+      round: 2,
+      agent: "codex",
+      githubUser: "trinity-automaton",
+      githubReviewUrl: "https://github.com/acme/app/pull/7#pullrequestreview-1",
+      tmuxName: "app-rev-1",
+    });
+
+    consoleLogSpy.mockClear();
+    await program.parseAsync(["node", "test", "review", "list", "app"]);
+
+    const line = String(consoleLogSpy.mock.calls.at(-1)?.[0]);
+    expect(line).toContain("changes requested");
+    expect(line).toContain("round 2");
+    expect(line).toContain("codex/trinity-automaton");
+    expect(line).toContain("https://github.com/acme/app/pull/7#pullrequestreview-1");
+    expect(line).toContain("tmux:app-rev-1");
   });
 
   it("rejects unknown review run statuses", async () => {

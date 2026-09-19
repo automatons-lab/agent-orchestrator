@@ -10,8 +10,9 @@ import {
   triggerCodeReviewForSession,
   type CodeReviewRunStatus,
   type CodeReviewRunSummary,
+  type Runtime,
 } from "@aoagents/ao-core";
-import { getSessionManager } from "../lib/create-session-manager.js";
+import { getPluginRegistry, getSessionManager } from "../lib/create-session-manager.js";
 
 const RUN_STATUSES: ReadonlySet<CodeReviewRunStatus> = new Set([
   "queued",
@@ -49,8 +50,43 @@ function printRun(run: CodeReviewRunSummary): void {
     parts.push(chalk.blue(`PR #${run.prNumber}`));
   }
 
+  // AO-native review details (fork): verdict, round, agent/identity, posted review, tmux pane.
+  if (run.verdict) {
+    parts.push(formatVerdict(run.verdict));
+  }
+  if (run.round !== undefined) {
+    parts.push(chalk.dim(`round ${run.round}`));
+  }
+  if (run.agent || run.githubUser) {
+    parts.push(chalk.magenta([run.agent, run.githubUser].filter(Boolean).join("/")));
+  }
+  if (run.githubReviewUrl) {
+    parts.push(chalk.underline(run.githubReviewUrl));
+  }
+  if (run.tmuxName) {
+    parts.push(chalk.dim(`tmux:${run.tmuxName}`));
+  }
+
   console.log(parts.join("  "));
 }
+
+function formatVerdict(verdict: NonNullable<CodeReviewRunSummary["verdict"]>): string {
+  switch (verdict) {
+    case "approve":
+      return chalk.green("approved");
+    case "request_changes":
+      return chalk.yellow("changes requested");
+    case "comment":
+      return chalk.dim("commented");
+  }
+}
+
+const TERMINAL_RUN_STATUSES: ReadonlySet<CodeReviewRunStatus> = new Set([
+  "clean",
+  "failed",
+  "cancelled",
+  "outdated",
+]);
 
 function printSendResult(run: CodeReviewRunSummary, sentFindingCount: number): void {
   const findings = sentFindingCount === 1 ? "1 finding" : `${sentFindingCount} findings`;
@@ -253,6 +289,71 @@ export function registerReview(program: Command): void {
           console.error(chalk.red(error.message));
           process.exit(1);
         }
+        console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  review
+    .command("cancel")
+    .description("Cancel an AO-local reviewer run and tear down its tmux session")
+    .argument("<run>", "Review run ID or reviewer session ID")
+    .option("-p, --project <project>", "Project ID (searches all projects if omitted)")
+    .option("--json", "Output as JSON")
+    .action(async (runRef: string, opts: { project?: string; json?: boolean }) => {
+      try {
+        const config = loadConfig();
+        if (opts.project && !config.projects[opts.project]) {
+          throw new Error(`Unknown project: ${opts.project}`);
+        }
+
+        const projectIds = opts.project ? [opts.project] : Object.keys(config.projects);
+        const target = getRunProjectId(projectIds, runRef);
+        if (!target) {
+          throw new Error(`Review run not found: ${runRef}`);
+        }
+        if (TERMINAL_RUN_STATUSES.has(target.run.status)) {
+          throw new Error(
+            `Review run ${target.run.reviewerSessionId} is already ${target.run.status}; nothing to cancel.`,
+          );
+        }
+
+        const store = createCodeReviewStore(target.projectId);
+        const run = store.updateRun(target.run.id, {
+          status: "cancelled",
+          terminationReason: "cancelled from CLI",
+          completedAt: new Date().toISOString(),
+        });
+
+        let runtimeError: string | undefined;
+        if (run.tmuxName) {
+          const project = config.projects[target.projectId];
+          const runtimeName = project?.runtime ?? config.defaults.runtime;
+          try {
+            const registry = await getPluginRegistry(config);
+            const runtime = registry.get<Runtime>("runtime", runtimeName);
+            if (!runtime) {
+              throw new Error(`Runtime plugin '${runtimeName}' not found`);
+            }
+            await runtime.destroy({ id: run.tmuxName, runtimeName, data: {} });
+          } catch (error) {
+            runtimeError = error instanceof Error ? error.message : String(error);
+          }
+        }
+
+        if (opts.json) {
+          console.log(JSON.stringify({ run, runtimeError: runtimeError ?? null }, null, 2));
+          return;
+        }
+
+        console.log(
+          chalk.green(
+            `Cancelled ${chalk.cyan(run.reviewerSessionId)}${
+              run.tmuxName ? (runtimeError ? ` (tmux ${run.tmuxName} not torn down: ${runtimeError})` : ` and tore down tmux ${run.tmuxName}`) : ""
+            }`,
+          ),
+        );
+      } catch (error) {
         console.error(chalk.red(error instanceof Error ? error.message : String(error)));
         process.exit(1);
       }

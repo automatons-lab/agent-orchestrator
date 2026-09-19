@@ -7,7 +7,9 @@ import type { CodeReviewFinding } from "@aoagents/ao-core";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import type { ProjectInfo } from "@/lib/project-name";
 import {
+  formatReviewVerdict,
   getReviewBoardColumn,
+  hasNativeReviewDetails,
   REVIEW_BOARD_COLUMNS,
   REVIEW_COLUMN_LABELS,
   type DashboardReviewRun,
@@ -930,6 +932,38 @@ function ReviewCard({
             <span className="card__pr">#{run.prNumber}</span>
           ) : null}
         </div>
+
+        {hasNativeReviewDetails(run) ? (
+          <div className="card__meta review-card__verdict" data-review-verdict={run.verdict ?? ""}>
+            <span className="card__branch">Verdict: {formatReviewVerdict(run.verdict)}</span>
+            {run.round !== undefined ? (
+              <>
+                <span className="card__meta-sep" aria-hidden="true">
+                  ·
+                </span>
+                <span>round {run.round}</span>
+              </>
+            ) : null}
+            {run.agent || run.githubUser ? (
+              <>
+                <span className="card__meta-sep" aria-hidden="true">
+                  ·
+                </span>
+                <span>{[run.agent, run.githubUser].filter(Boolean).join(" · ")}</span>
+              </>
+            ) : null}
+            {run.githubReviewUrl ? (
+              <>
+                <span className="card__meta-sep" aria-hidden="true">
+                  ·
+                </span>
+                <a href={run.githubReviewUrl} target="_blank" rel="noreferrer" className="card__pr">
+                  GitHub review
+                </a>
+              </>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="px-[10px] pb-[5px]">
           <p className="session-card__secondary">{secondaryText}</p>

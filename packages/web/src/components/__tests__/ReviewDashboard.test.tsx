@@ -143,6 +143,50 @@ describe("ReviewDashboard", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
+  it("shows AO-native review details: verdict, round, agent, identity and the GitHub review link", () => {
+    render(
+      <ReviewDashboard
+        runs={[
+          makeRun({
+            status: "clean",
+            findingCount: 0,
+            openFindingCount: 0,
+            dismissedFindingCount: 0,
+            verdict: "request_changes",
+            round: 2,
+            agent: "codex",
+            githubUser: "trinity-automaton",
+            githubReviewUrl: "https://github.com/acme/todo/pull/7#pullrequestreview-11",
+          }),
+        ]}
+        projectId="my-app"
+        projectName="My App"
+        projects={[{ id: "my-app", name: "My App", path: "/tmp/my-app" }]}
+      />,
+    );
+
+    expect(screen.getByText("Verdict: Changes requested")).toBeInTheDocument();
+    expect(screen.getByText("round 2")).toBeInTheDocument();
+    expect(screen.getByText("codex · trinity-automaton")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "GitHub review" })).toHaveAttribute(
+      "href",
+      "https://github.com/acme/todo/pull/7#pullrequestreview-11",
+    );
+  });
+
+  it("omits the verdict row for runs without native review details", () => {
+    render(
+      <ReviewDashboard
+        runs={[makeRun({})]}
+        projectId="my-app"
+        projectName="My App"
+        projects={[{ id: "my-app", name: "My App", path: "/tmp/my-app" }]}
+      />,
+    );
+
+    expect(screen.queryByText(/^Verdict:/)).not.toBeInTheDocument();
+  });
+
   it("surfaces a completed failed review run as a failure", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json({

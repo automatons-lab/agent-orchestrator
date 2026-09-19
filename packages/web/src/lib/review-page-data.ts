@@ -150,6 +150,8 @@ export async function getReviewPageData(project?: string): Promise<ReviewPageDat
         ...store.listRunSummaries().map((run) => {
           const worker = workerSessionsById.get(run.linkedSessionId);
           return {
+            // Spreads every store field, including the AO-native review details
+            // (verdict, round, agent, githubUser, githubReviewUrl, tmuxName, postMode).
             ...run,
             projectName: project.name,
             workerTitle:
