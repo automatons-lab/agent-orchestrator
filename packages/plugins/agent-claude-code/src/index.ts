@@ -1041,6 +1041,19 @@ async function setupHookInWorkspace(workspacePath: string): Promise<void> {
   await writeFile(settingsPath, JSON.stringify(existingSettings, null, 2) + "\n", "utf-8");
 }
 
+/** Effort levels the Claude CLI accepts for --effort (from `claude --help`). */
+const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * Fork patch: agentConfig.reasoningEffort → --effort (mirrors agent-codex).
+ * Invalid or missing values are ignored so the CLI default applies.
+ */
+function appendEffortFlag(parts: string[], reasoningEffort: unknown): void {
+  if (typeof reasoningEffort === "string" && CLAUDE_EFFORT_LEVELS.has(reasoningEffort)) {
+    parts.push("--effort", reasoningEffort);
+  }
+}
+
 // =============================================================================
 // Agent Implementation
 // =============================================================================
@@ -1062,6 +1075,7 @@ function createClaudeCodeAgent(): Agent {
       if (config.model) {
         parts.push("--model", shellEscape(config.model));
       }
+      appendEffortFlag(parts, config.projectConfig.agentConfig?.["reasoningEffort"]);
 
       if (config.systemPromptFile) {
         if (isWindows()) {
@@ -1205,6 +1219,7 @@ function createClaudeCodeAgent(): Agent {
       if (project.agentConfig?.model) {
         parts.push("--model", shellEscape(project.agentConfig.model as string));
       }
+      appendEffortFlag(parts, project.agentConfig?.["reasoningEffort"]);
 
       return parts.join(" ");
     },

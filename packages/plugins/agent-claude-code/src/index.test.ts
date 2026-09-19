@@ -260,6 +260,24 @@ describe("getLaunchCommand", () => {
     expect(cmd).toContain("--dangerously-skip-permissions");
   });
 
+  it("passes agentConfig.reasoningEffort as --effort", () => {
+    const base = makeLaunchConfig({ model: "claude-opus-4-6" });
+    const cmd = agent.getLaunchCommand({
+      ...base,
+      projectConfig: { ...base.projectConfig, agentConfig: { reasoningEffort: "high" } },
+    });
+    expect(cmd).toContain("--effort high");
+  });
+
+  it("ignores an invalid agentConfig.reasoningEffort", () => {
+    const base = makeLaunchConfig({ model: "claude-opus-4-6" });
+    const cmd = agent.getLaunchCommand({
+      ...base,
+      projectConfig: { ...base.projectConfig, agentConfig: { reasoningEffort: "ultra" } },
+    });
+    expect(cmd).not.toContain("--effort");
+  });
+
   it("shell-escapes model argument", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ model: "claude-opus-4-6" }));
     expect(cmd).toContain("--model 'claude-opus-4-6'");
@@ -679,6 +697,25 @@ describe("getSessionInfo", () => {
 
       expect(command).toBe("claude --resume 'persisted-uuid'");
       expect(mockReaddir).not.toHaveBeenCalled();
+    });
+
+    it("appends --effort from agentConfig.reasoningEffort", async () => {
+      const agent = create();
+      const session = makeSession({
+        workspacePath: "/workspace/test-project",
+        metadata: { claudeSessionUuid: "persisted-uuid" },
+      });
+
+      const command = await agent.getRestoreCommand!(session, {
+        name: "test-project",
+        repo: "owner/repo",
+        path: "/workspace/test-project",
+        defaultBranch: "main",
+        sessionPrefix: "test",
+        agentConfig: { reasoningEffort: "max" },
+      });
+
+      expect(command).toBe("claude --resume 'persisted-uuid' --effort max");
     });
   });
 
