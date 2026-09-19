@@ -385,6 +385,37 @@ describe("getLaunchCommand", () => {
 
   // -- Reasoning effort tests --
   describe("reasoning effort", () => {
+    it("passes agentConfig.reasoningEffort as model_reasoning_effort", () => {
+      const base = makeLaunchConfig();
+      const cmd = agent.getLaunchCommand({
+        ...base,
+        model: "gpt-6-astra",
+        projectConfig: { ...base.projectConfig, agentConfig: { reasoningEffort: "xhigh" } },
+      });
+      expect(cmd).toContain("-c model_reasoning_effort=xhigh");
+    });
+
+    it("ignores an invalid agentConfig.reasoningEffort", () => {
+      const base = makeLaunchConfig();
+      const cmd = agent.getLaunchCommand({
+        ...base,
+        model: "gpt-6-astra",
+        projectConfig: { ...base.projectConfig, agentConfig: { reasoningEffort: "extreme" } },
+      });
+      expect(cmd).not.toContain("model_reasoning_effort");
+    });
+
+    it("lets agentConfig.reasoningEffort override the o-series default", () => {
+      const base = makeLaunchConfig();
+      const cmd = agent.getLaunchCommand({
+        ...base,
+        model: "o3",
+        projectConfig: { ...base.projectConfig, agentConfig: { reasoningEffort: "low" } },
+      });
+      expect(cmd).toContain("-c model_reasoning_effort=low");
+      expect(cmd).not.toContain("model_reasoning_effort=high");
+    });
+
     it("adds model_reasoning_effort=high for o3 model", () => {
       const cmd = agent.getLaunchCommand(makeLaunchConfig({ model: "o3" }));
       expect(cmd).toContain("-c model_reasoning_effort=high");

@@ -512,15 +512,32 @@ function appendApprovalFlags(
   }
 }
 
-/** Append model and reasoning flags to a command parts array */
-function appendModelFlags(parts: string[], model: string | undefined): void {
-  if (!model) return;
-  parts.push("--model", shellEscape(model));
+/** Reasoning effort values Codex accepts for model_reasoning_effort */
+const CODEX_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 
-  // Auto-detect o-series models and enable reasoning via config override.
+/** Append model and reasoning flags to a command parts array */
+function appendModelFlags(
+  parts: string[],
+  model: string | undefined,
+  reasoningEffort?: unknown,
+): void {
+  if (model) {
+    parts.push("--model", shellEscape(model));
+  }
+
   // Codex does not have a --reasoning flag; reasoning is controlled via
-  // the model_reasoning_effort config key.
-  if (/^o[34]/i.test(model)) {
+  // the model_reasoning_effort config key. Fork patch: an explicit
+  // agentConfig.reasoningEffort pins it per project so workers no longer
+  // inherit whatever ~/.codex/config.toml currently says (the TUI /model
+  // command rewrites that file). Invalid values are ignored.
+  const effort =
+    typeof reasoningEffort === "string" && CODEX_REASONING_EFFORTS.has(reasoningEffort)
+      ? reasoningEffort
+      : undefined;
+  if (effort) {
+    parts.push("-c", `model_reasoning_effort=${effort}`);
+  } else if (model && /^o[34]/i.test(model)) {
+    // Auto-detect o-series models and enable reasoning via config override.
     parts.push("-c", "model_reasoning_effort=high");
   }
 }
@@ -610,7 +627,7 @@ function createCodexAgent(): Agent {
       appendNoUpdateCheckFlag(parts);
 
       appendApprovalFlags(parts, config.permissions);
-      appendModelFlags(parts, config.model);
+      appendModelFlags(parts, config.model, config.projectConfig.agentConfig?.["reasoningEffort"]);
 
       if (config.systemPromptFile) {
         if (isWindows()) {
