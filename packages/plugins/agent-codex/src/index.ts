@@ -13,6 +13,7 @@ import {
   type Agent,
   type AgentSessionInfo,
   type AgentLaunchConfig,
+  type ReviewCommandConfig,
   type ActivityState,
   type ActivityDetection,
   type CostEstimate,
@@ -620,6 +621,25 @@ function createCodexAgent(): Agent {
   return {
     name: "codex",
     processName: "codex",
+
+    /**
+     * AO-native reviewer command (fork): one headless `codex exec` run that
+     * reads its instructions from stdin (`-`), stays in the read-only sandbox
+     * (no writes, no network) and writes its final JSON — shaped by the schema
+     * file — to `outputFile`. Core validates that JSON; nothing here posts
+     * anywhere. POSIX shell only (stdin redirection).
+     */
+    getReviewCommand(config: ReviewCommandConfig): string {
+      const binary = resolvedBinary ?? "codex";
+      const parts: string[] = [shellEscape(binary), "exec"];
+      appendNoUpdateCheckFlag(parts);
+      parts.push("--sandbox", "read-only", "--skip-git-repo-check");
+      appendModelFlags(parts, config.model, config.reasoningEffort);
+      parts.push("--output-schema", shellEscape(config.schemaFile));
+      parts.push("-o", shellEscape(config.outputFile));
+      parts.push("-", "<", shellEscape(config.promptFile));
+      return formatLaunchCommand(parts);
+    },
 
     getLaunchCommand(config: AgentLaunchConfig): string {
       const binary = resolvedBinary ?? "codex";

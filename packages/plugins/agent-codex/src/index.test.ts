@@ -6,6 +6,7 @@ import {
   type RuntimeHandle,
   type AgentLaunchConfig,
   type AgentSpecificConfig,
+  type ReviewCommandConfig,
 } from "@aoagents/ao-core";
 
 // ---------------------------------------------------------------------------
@@ -2208,5 +2209,45 @@ describe.skipIf(process.platform === "win32")("shell wrapper content", () => {
       expect(content).toContain("source");
       expect(content).toContain("ao-metadata-helper.sh");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getReviewCommand (fork: AO-native reviewer)
+// ---------------------------------------------------------------------------
+
+describe("getReviewCommand", () => {
+  const agent = create();
+  const review: ReviewCommandConfig = {
+    workspacePath: "/reviews/ws",
+    promptFile: "/reviews/ws/.ao-review/prompt.md",
+    schemaFile: "/reviews/ws/.ao-review/schema.json",
+    outputFile: "/reviews/ws/.ao-review/result.json",
+  };
+
+  it("builds a read-only headless exec that reads the prompt from stdin", () => {
+    expect(agent.getReviewCommand!(review)).toBe(
+      "'codex' exec -c check_for_update_on_startup=false --sandbox read-only --skip-git-repo-check " +
+        "--output-schema '/reviews/ws/.ao-review/schema.json' -o '/reviews/ws/.ao-review/result.json' " +
+        "- < '/reviews/ws/.ao-review/prompt.md'",
+    );
+  });
+
+  it("passes model and reasoning effort when given", () => {
+    const cmd = agent.getReviewCommand!({ ...review, model: "gpt-6-astra", reasoningEffort: "xhigh" });
+    expect(cmd).toContain("--model 'gpt-6-astra'");
+    expect(cmd).toContain("-c model_reasoning_effort=xhigh");
+    expect(cmd).toContain("--sandbox read-only");
+  });
+
+  it("omits model and effort when absent and ignores invalid effort", () => {
+    const cmd = agent.getReviewCommand!({ ...review, reasoningEffort: "ultra" });
+    expect(cmd).not.toContain("--model");
+    expect(cmd).not.toContain("model_reasoning_effort");
+  });
+
+  it("escapes paths with shell metacharacters", () => {
+    const cmd = agent.getReviewCommand!({ ...review, promptFile: "/tmp/it's here/prompt.md" });
+    expect(cmd).toContain("< '/tmp/it'\\''s here/prompt.md'");
   });
 });

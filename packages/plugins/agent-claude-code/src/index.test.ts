@@ -6,6 +6,7 @@ import {
   type RuntimeHandle,
   type AgentLaunchConfig,
   type WorkspaceHooksConfig,
+  type ReviewCommandConfig,
 } from "@aoagents/ao-core";
 
 // ---------------------------------------------------------------------------
@@ -1436,5 +1437,47 @@ describe("setupWorkspaceHooks on win32", () => {
       .filter((h) => h.command.includes("metadata-updater"));
     // Must be exactly 1 — no duplicates
     expect(metadataHooks).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getReviewCommand (fork: AO-native reviewer)
+// ---------------------------------------------------------------------------
+
+describe("getReviewCommand", () => {
+  const agent = create();
+  const review: ReviewCommandConfig = {
+    workspacePath: "/reviews/ws",
+    promptFile: "/reviews/ws/.ao-review/prompt.md",
+    schemaFile: "/reviews/ws/.ao-review/schema.json",
+    outputFile: "/reviews/ws/.ao-review/result.json",
+  };
+
+  it("builds a headless print run with a structured verdict and read-only tools", () => {
+    expect(agent.getReviewCommand!(review)).toBe(
+      "claude -p --no-session-persistence --output-format json " +
+        "--json-schema \"$(cat '/reviews/ws/.ao-review/schema.json')\" " +
+        "--allowedTools 'Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*)' " +
+        "--disallowedTools 'Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch' " +
+        "< '/reviews/ws/.ao-review/prompt.md' > '/reviews/ws/.ao-review/result.json'",
+    );
+  });
+
+  it("keeps plugins enabled and passes model and effort when given", () => {
+    const cmd = agent.getReviewCommand!({ ...review, model: "claude-opus-5", reasoningEffort: "max" });
+    expect(cmd).not.toContain("--bare");
+    expect(cmd).toContain("--model 'claude-opus-5'");
+    expect(cmd).toContain("--effort max");
+  });
+
+  it("omits model and effort when absent and ignores invalid effort", () => {
+    const cmd = agent.getReviewCommand!({ ...review, reasoningEffort: "ultra" });
+    expect(cmd).not.toContain("--model");
+    expect(cmd).not.toContain("--effort");
+  });
+
+  it("escapes paths with shell metacharacters", () => {
+    const cmd = agent.getReviewCommand!({ ...review, outputFile: "/tmp/it's here/out.json" });
+    expect(cmd).toContain("> '/tmp/it'\\''s here/out.json'");
   });
 });

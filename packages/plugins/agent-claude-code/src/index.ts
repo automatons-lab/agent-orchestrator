@@ -5,6 +5,7 @@ import {
   type Agent,
   type AgentSessionInfo,
   type AgentLaunchConfig,
+  type ReviewCommandConfig,
   type ActivityDetection,
   type ActivityState,
   type CostEstimate,
@@ -1054,6 +1055,32 @@ function appendEffortFlag(parts: string[], reasoningEffort: unknown): void {
   }
 }
 
+/**
+ * Tools the AO-native reviewer may use (fork): read-only inspection plus git
+ * read commands. Everything else is denied automatically in `-p` mode.
+ * Note: this CLI has no `LS` tool; directory listing goes through Glob.
+ */
+const CLAUDE_REVIEW_ALLOWED_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Bash(git diff:*)",
+  "Bash(git log:*)",
+  "Bash(git show:*)",
+  "Bash(git status:*)",
+  "Bash(git ls-files:*)",
+];
+
+/** Explicitly denied for the reviewer even if a settings file would allow them. */
+const CLAUDE_REVIEW_DISALLOWED_TOOLS = [
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  "WebFetch",
+  "WebSearch",
+];
+
 // =============================================================================
 // Agent Implementation
 // =============================================================================
@@ -1062,6 +1089,35 @@ function createClaudeCodeAgent(): Agent {
   return {
     name: "claude-code",
     processName: "claude",
+
+    /**
+     * AO-native reviewer command (fork): one `claude -p` run that returns a
+     * structured JSON verdict (`--json-schema`) written to `outputFile`. Tools
+     * are limited to read-only inspection and git read commands, so the
+     * reviewer can neither edit files nor reach the network. Plugins and
+     * skills stay enabled (no --bare) because the review prompt loads them.
+     * Core validates the JSON. POSIX shell only (stdin/stdout redirection).
+     */
+    getReviewCommand(config: ReviewCommandConfig): string {
+      const parts: string[] = [
+        "claude",
+        "-p",
+        "--no-session-persistence",
+        "--output-format",
+        "json",
+        "--json-schema",
+        `"$(cat ${shellEscape(config.schemaFile)})"`,
+      ];
+      if (config.model) {
+        parts.push("--model", shellEscape(config.model));
+      }
+      appendEffortFlag(parts, config.reasoningEffort);
+      parts.push("--allowedTools", shellEscape(CLAUDE_REVIEW_ALLOWED_TOOLS.join(",")));
+      parts.push("--disallowedTools", shellEscape(CLAUDE_REVIEW_DISALLOWED_TOOLS.join(",")));
+      parts.push("<", shellEscape(config.promptFile), ">", shellEscape(config.outputFile));
+      return parts.join(" ");
+    },
+
     getLaunchCommand(config: AgentLaunchConfig): string {
       // Note: CLAUDECODE is unset via getEnvironment() (set to ""), not here.
       // This command must be safe for both shell and execFile contexts.
