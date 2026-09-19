@@ -41,6 +41,39 @@ reactions:
 
 `maxRetries` matters more than you'd think — occasionally a reviewer and agent will disagree about the right fix, and you don't want the agent stuck in a loop.
 
+## AO-native reviewer
+
+Instead of waiting for a human or a CI bot, AO can review the PR itself. Enable the `reviewer` role (usually under `defaults:`) with an identity that differs from the worker's:
+
+```yaml title="agent-orchestrator.yaml"
+identities:
+  neo-automaton: { tokenEnv: NEO_GITHUB_TOKEN }
+  trinity-automaton: { tokenEnv: TRINITY_GITHUB_TOKEN }
+
+defaults:
+  worker:
+    githubUser: neo-automaton
+  reviewer:
+    enabled: true
+    githubUser: trinity-automaton
+    agent: codex                      # codex | claude-code
+    agentConfig: { model: gpt-6-astra, reasoningEffort: xhigh }
+    timeoutMinutes: 25
+    maxConcurrent: 1
+    postMode: live                    # dry-run writes the review to the run directory only
+    # rulesFile: ~/.agent-orchestrator/rules/review.md
+```
+
+What happens on every new head SHA of an open PR (unless CI is failing or the PR is already cleanly approved):
+
+1. AO requests `reviewer.githubUser` as a reviewer on the PR and creates a review run (`ao review list`).
+2. It fetches the PR head into a detached worktree and writes `.ao-review/context.md` (PR, changed files, linked issue with its acceptance criteria, earlier reviews, unresolved threads), `prompt.md` and `schema.json`.
+3. The agent runs headless in its own tmux session (`<prefix>-rev-N`) with a read-only sandbox, an allow-listed environment and no token: Codex `exec --sandbox read-only --output-schema`, Claude `-p --json-schema` with read-only tools.
+4. The agent's JSON verdict (`approve`, `request_changes`, `comment`, acceptance-criteria table, findings) is validated. Blocking findings with a location become inline comments; the rest go into the review body.
+5. AO posts the review with the reviewer identity's token. A `request_changes` reaches the worker through the normal changes-requested path; an `approve` counts toward branch protection.
+
+Rounds are capped by `reactions.changes-requested.maxRounds` (default 6); after that AO notifies a human instead of reviewing again. A new push while a review is running supersedes it. Runs that fail (timeout, invalid output, posting error) are marked `failed` with the reason and notified. `ao review cancel <run>` stops a running review; the reviewer pane stays open for 30 minutes after a run so you can inspect it.
+
 ## Manually replay a review
 
 ```bash
