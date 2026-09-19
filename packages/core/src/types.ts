@@ -479,6 +479,21 @@ export function isProcessProbeIndeterminate(
   return result === PROCESS_PROBE_INDETERMINATE;
 }
 
+/**
+ * Inputs for a headless, read-only review invocation (fork: AO-native reviewer).
+ * The command must run in `workspacePath`, read its instructions from
+ * `promptFile`, keep to read-only tools, never touch the network, and write the
+ * final JSON verdict (shaped by `schemaFile`) to `outputFile` before exiting.
+ */
+export interface ReviewCommandConfig {
+  workspacePath: string;
+  promptFile: string;
+  schemaFile: string;
+  outputFile: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
 export interface Agent {
   readonly name: string;
 
@@ -491,6 +506,12 @@ export interface Agent {
    * Use post-launch for interactive CLIs that must start first and receive input over stdin.
    */
   readonly promptDelivery?: "inline" | "post-launch";
+
+  /**
+   * Shell command for one headless, read-only review run (fork). Agents that
+   * cannot run non-interactively with a structured output leave it undefined.
+   */
+  getReviewCommand?(config: ReviewCommandConfig): string;
 
   /** Get the shell command to launch this agent */
   getLaunchCommand(config: AgentLaunchConfig): string;

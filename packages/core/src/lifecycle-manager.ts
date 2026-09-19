@@ -36,7 +36,8 @@ import {
   type Session,
   type CanonicalSessionLifecycle,
   type EventPriority,
-  type ProjectConfig as _ProjectConfig,
+  type ProjectConfig,
+  type Tracker,
   type PREnrichmentData,
   type CICheck,
   type CIFailureSummary,
@@ -71,6 +72,13 @@ import { createCorrelationId, createProjectObserver } from "./observability.js";
 import { resolveNotifierTarget } from "./notifier-resolution.js";
 import { recordNotificationDelivery } from "./notification-observability.js";
 import { resolveSessionRole } from "./agent-selection.js";
+import { createCodeReviewStore } from "./code-review-store.js";
+import { triggerCodeReviewForSession } from "./code-review-manager.js";
+import {
+  executeNativeReview,
+  resolveReviewerConfig,
+  type ResolvedReviewerConfig,
+} from "./native-review.js";
 import {
   DETECTING_MAX_ATTEMPTS,
   createDetectingDecision,
@@ -2400,15 +2408,162 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
    * push will re-trigger the attempt. SCM plugin without `requestReviewers`
    * silently skips (auto-routing is opt-in).
    */
+  // ---------------------------------------------------------------------------
+  // Fork: AO-native reviewer dispatch
+  // ---------------------------------------------------------------------------
+
+  /** Run ids currently executing in this engine process (bounds concurrency). */
+  const nativeReviewsInFlight = new Set<string>();
+  const nativeReviewerConfigErrors = new Set<string>();
+
+  function safeResolveReviewer(project: ProjectConfig): ResolvedReviewerConfig | null {
+    const maxRounds = config.reactions["changes-requested"]?.maxRounds;
+    try {
+      const resolved = resolveReviewerConfig(
+        project,
+        config.defaults,
+        typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : undefined,
+      );
+      nativeReviewerConfigErrors.delete(project.name);
+      return resolved;
+    } catch (err) {
+      if (!nativeReviewerConfigErrors.has(project.name)) {
+        nativeReviewerConfigErrors.add(project.name);
+        console.error(`[native-review] ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return null;
+    }
+  }
+
+  const NATIVE_ACTIVE_STATUSES = new Set(["queued", "preparing", "running"]);
+
+  /**
+   * One native review per PR head: supersede runs for older heads, respect the
+   * per-PR round limit and the engine-wide concurrency limit, then create the
+   * run and execute it in the background. Failures are notified, never thrown.
+   */
+  async function maybeDispatchNativeReview(
+    session: Session,
+    project: ProjectConfig,
+    reviewer: ResolvedReviewerConfig,
+    headSha: string,
+    scm: SCM,
+  ): Promise<void> {
+    if (session.metadata["lastNativeReviewSha"] === headSha) return;
+    const projectId = session.projectId;
+    const store = createCodeReviewStore(projectId);
+    const runs = store.listRuns({ linkedSessionId: session.id });
+    const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
+    for (const stale of runs.filter((r) => NATIVE_ACTIVE_STATUSES.has(r.status))) {
+      if (stale.targetSha === headSha) return; // already reviewing this head
+      store.updateRun(stale.id, {
+        status: "outdated",
+        terminationReason: `superseded by head ${headSha.slice(0, 7)}`,
+        completedAt: new Date().toISOString(),
+      });
+      nativeReviewsInFlight.delete(stale.id);
+      if (stale.tmuxName && runtime) {
+        await runtime
+          .destroy({ id: stale.tmuxName, runtimeName: runtime.name, data: {} })
+          .catch(() => {});
+      }
+    }
+    const rounds = runs.filter((r) => r.status !== "outdated" && r.status !== "cancelled").length;
+    if (rounds >= reviewer.maxRounds) {
+      if (session.metadata["nativeReviewStuck"] !== "1") {
+        updateSessionMetadata(session, { nativeReviewStuck: "1" });
+        await notifyHuman(
+          createEvent("review.comments_unresolved", {
+            sessionId: session.id,
+            projectId,
+            message: `AO-native review stopped after ${rounds} rounds on PR #${session.pr?.number ?? "?"}; a human needs to look.`,
+            data: { rounds, maxRounds: reviewer.maxRounds, headSha },
+          }),
+          "urgent",
+        ).catch(() => {});
+      }
+      return;
+    }
+    if (nativeReviewsInFlight.size >= reviewer.maxConcurrent) return; // retry next tick
+    const agent = registry.get<Agent>("agent", reviewer.agent);
+    if (!agent?.getReviewCommand || !runtime) {
+      const key = `${project.name}:${reviewer.agent}`;
+      if (!nativeReviewerConfigErrors.has(key)) {
+        nativeReviewerConfigErrors.add(key);
+        console.error(
+          `[native-review] project "${project.name}": agent "${reviewer.agent}" cannot run headless reviews or runtime is missing`,
+        );
+      }
+      return;
+    }
+    const tracker = project.tracker?.plugin
+      ? (registry.get<Tracker>("tracker", project.tracker.plugin) ?? undefined)
+      : undefined;
+    const summary = await triggerCodeReviewForSession(
+      { config, sessionManager, resolveTargetSha: async () => headSha },
+      {
+        sessionId: session.id,
+        requestedBy: "system",
+        summary: `AO-native review round ${rounds + 1} for ${headSha.slice(0, 7)}`,
+      },
+    );
+    const run = store.getRun(summary.id);
+    if (!run) return;
+    updateSessionMetadata(session, { lastNativeReviewSha: headSha });
+    nativeReviewsInFlight.add(run.id);
+    void executeNativeReview(
+      {
+        config,
+        projectId,
+        project,
+        session,
+        reviewer,
+        store,
+        scm,
+        ...(tracker ? { tracker } : {}),
+        runtime,
+        agent,
+      },
+      run,
+    )
+      .then((result) => {
+        if (result.run.status === "failed") {
+          return notifyHuman(
+            createEvent("reaction.escalated", {
+              sessionId: session.id,
+              projectId,
+              message: `AO-native review ${run.id} failed: ${result.run.terminationReason ?? "unknown reason"}`,
+              data: { runId: run.id, headSha, tmuxName: result.run.tmuxName },
+            }),
+            "action",
+          );
+        }
+        return undefined;
+      })
+      .catch((err) => {
+        console.error(
+          `[native-review] run ${run.id} crashed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
+      .finally(() => {
+        nativeReviewsInFlight.delete(run.id);
+      });
+  }
+
   async function maybeAutoRequestReviewers(session: Session): Promise<void> {
     if (!session.pr) return;
     const project = config.projects[session.projectId];
     if (!project) return;
-    const reviewers = project.reviewers ?? [];
+    // Fork: the AO-native reviewer identity is always requested as a reviewer too,
+    // so the PR shows who is expected to review and the ruleset counts its approval.
+    const nativeReviewer = safeResolveReviewer(project);
+    const reviewers = Array.from(
+      new Set([...(project.reviewers ?? []), ...(nativeReviewer ? [nativeReviewer.githubUser] : [])]),
+    );
     if (reviewers.length === 0) return;
 
     const scm = project.scm?.plugin ? registry.get<SCM>("scm", project.scm.plugin) : null;
-    if (!scm?.requestReviewers) return;
+    if (!scm?.requestReviewers && !nativeReviewer) return;
 
     const cached = prEnrichmentCache.get(
       `${session.pr.owner}/${session.pr.repo}#${session.pr.number}`,
@@ -2445,6 +2600,16 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // Need head SHA to gate the request — without it we'd spam every cycle.
     const headSha = cached.headSha;
     if (!headSha) return;
+
+    // Fork: spawn the AO-native review for this head (own SHA gate + concurrency).
+    if (nativeReviewer && scm) {
+      await maybeDispatchNativeReview(session, project, nativeReviewer, headSha, scm).catch((err) => {
+        console.error(
+          `[native-review] dispatch failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
+    if (!scm?.requestReviewers) return;
 
     const lastRequestedSha = session.metadata["lastReviewRequestedSha"] ?? "";
     if (headSha === lastRequestedSha) return;

@@ -37,6 +37,24 @@ export interface CodeReviewRun {
   reviewerWorkspacePath?: string;
   summary?: string;
   terminationReason?: string;
+  // --- AO-native review (fork) ---
+  /** Verdict the reviewer agent produced. */
+  verdict?: "approve" | "request_changes" | "comment";
+  /** GitHub review id / URL once posted. */
+  githubReviewId?: number;
+  githubReviewUrl?: string;
+  /** tmux session the reviewer ran in (runtime handle id). */
+  tmuxName?: string;
+  /** 1-based review round for the linked session's PR. */
+  round?: number;
+  /** Agent plugin and GitHub identity used for this run. */
+  agent?: string;
+  githubUser?: string;
+  postMode?: "live" | "dry-run";
+  /** Review payload as it was (or would be) sent to the SCM. */
+  payloadPath?: string;
+  /** Raw reviewer output file. */
+  reviewerOutputPath?: string;
 }
 
 export interface CodeReviewFinding {
@@ -138,6 +156,14 @@ function parseOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
+function parseVerdict(value: unknown): CodeReviewRun["verdict"] {
+  return value === "approve" || value === "request_changes" || value === "comment" ? value : undefined;
+}
+
+function parsePostMode(value: unknown): CodeReviewRun["postMode"] {
+  return value === "live" || value === "dry-run" ? value : undefined;
+}
+
 function parseRunStatus(value: unknown): CodeReviewRunStatus {
   switch (value) {
     case "queued":
@@ -234,6 +260,17 @@ function parseRun(projectId: string, value: unknown): CodeReviewRun | null {
     reviewerWorkspacePath: parseOptionalString(value["reviewerWorkspacePath"]),
     summary: parseOptionalString(value["summary"]),
     terminationReason: parseOptionalString(value["terminationReason"]),
+    // AO-native review (fork)
+    verdict: parseVerdict(value["verdict"]),
+    githubReviewId: parseNumber(value["githubReviewId"]),
+    githubReviewUrl: parseOptionalString(value["githubReviewUrl"]),
+    tmuxName: parseOptionalString(value["tmuxName"]),
+    round: parseNumber(value["round"]),
+    agent: parseOptionalString(value["agent"]),
+    githubUser: parseOptionalString(value["githubUser"]),
+    postMode: parsePostMode(value["postMode"]),
+    payloadPath: parseOptionalString(value["payloadPath"]),
+    reviewerOutputPath: parseOptionalString(value["reviewerOutputPath"]),
   });
 }
 
