@@ -764,8 +764,17 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     },
   };
 
-  // Merge defaults with user-specified reactions (user wins)
-  config.reactions = { ...defaults, ...config.reactions };
+  // Merge defaults with user-specified reactions (user wins per field).
+  // Fork patch: merge per reaction key, not per map entry. A YAML override such
+  // as `changes-requested: { auto: true, action: send-to-agent, maxRounds: 6 }`
+  // used to replace the whole default entry, silently dropping `message` and
+  // making every send-to-agent dispatch for that key fail.
+  const merged: typeof config.reactions = { ...defaults };
+  for (const [key, override] of Object.entries(config.reactions ?? {})) {
+    if (!override) continue;
+    merged[key] = { ...(defaults[key] ?? {}), ...override };
+  }
+  config.reactions = merged;
 
   return config;
 }

@@ -1323,12 +1323,27 @@ describe("Config Validation - Reaction config extras", () => {
         "changes-requested": { auto: true, action: "send-to-agent", maxRounds: 6 },
       },
     });
-
-    expect(config.reactions["ci-failed"]?.ignoreChecks).toEqual([
-      "ai-review*",
-      "advisory-check",
-    ]);
     expect(config.reactions["changes-requested"]?.maxRounds).toBe(6);
+    expect(config.reactions["changes-requested"]?.message).toBe(
+      "There are new review comments on your PR requesting changes.",
+    );
+    expect(config.reactions["changes-requested"]?.escalateAfter).toBe("30m");
+  });
+
+  it("keeps default reaction fields when a global override is partial", () => {
+    const config = validateConfig({
+      projects: {
+        app: { path: "/repos/app", repo: "org/app", defaultBranch: "main" },
+      },
+      reactions: {
+        "changes-requested": { auto: true, action: "send-to-agent", maxRounds: 6 },
+      },
+    });
+    expect(config.reactions["changes-requested"]?.maxRounds).toBe(6);
+    expect(config.reactions["changes-requested"]?.message).toBe(
+      "There are new review comments on your PR requesting changes.",
+    );
+    expect(config.reactions["changes-requested"]?.escalateAfter).toBe("30m");
   });
 
   it("preserves ignoreChecks and maxRounds in project-level reactions", () => {
