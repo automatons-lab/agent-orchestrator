@@ -11,6 +11,8 @@ import {
   type OrchestratorConfig,
   type PluginRegistry,
   type PluginSlot,
+  checkIdentities as checkIdentityTokens,
+  engineIdentityLogin,
 } from "@aoagents/ao-core";
 import { runNotifyTest } from "../lib/notify-test.js";
 import { runRepoScript } from "../lib/script-runner.js";
@@ -303,6 +305,35 @@ async function checkOpenClawNotifier(
   pass(`OpenClaw notification totals: ${health.totalSent} sent, ${health.totalFailed} failed`);
 }
 
+/** Fork: every declared identity has a token and it belongs to that login. */
+async function checkIdentities(
+  config: OrchestratorConfig,
+  fail: (msg: string) => void,
+): Promise<void> {
+  const logins = Object.keys(config.identities ?? {});
+  if (logins.length === 0) {
+    warn("No identities: configured — roles use the engine's ambient gh login");
+    return;
+  }
+  const results = await checkIdentityTokens(config);
+  for (const r of results) {
+    const usage = r.usedBy.length > 0 ? `used by ${r.usedBy.join(", ")}` : "unused";
+    if (r.ok) {
+      pass(`identity ${r.login}: token from ${r.tokenEnv} verified (${usage})`);
+    } else if (r.usedBy.length === 0) {
+      warn(`identity ${r.login}: ${r.problem} (${usage})`);
+    } else {
+      fail(`identity ${r.login}: ${r.problem} (${usage})`);
+    }
+  }
+  const engine = engineIdentityLogin(config);
+  if (engine) {
+    pass(`engine SCM identity: ${engine} (defaults.scm.githubUser)`);
+  } else {
+    warn("defaults.scm.githubUser not set — engine API calls use the ambient gh login / GH_TOKEN");
+  }
+}
+
 async function checkNotifierConnectivity(
   config: OrchestratorConfig,
   fail: (msg: string) => void,
@@ -437,6 +468,7 @@ export function registerDoctor(program: Command): void {
         try {
           config = loadConfig(configPath);
           registry = await checkPluginResolution(config, fail);
+          await checkIdentities(config, fail);
           await checkNotifierConnectivity(config, fail);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

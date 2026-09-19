@@ -46,6 +46,8 @@ import {
   reapAoOrphans,
   type DaemonChildSweepResult,
   type AoOrphanProcess,
+  applyEngineIdentity,
+  checkIdentities,
 } from "@aoagents/ao-core";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import { exec, execSilent, git } from "../lib/shell.js";
@@ -869,6 +871,28 @@ async function runStartup(
   },
 ): Promise<number> {
   await runtimePreflight(config);
+
+  // Fork: identities — the engine's own GitHub login comes from config, and
+  // every identity a role references must have its token before we spawn.
+  const engineIdentity = applyEngineIdentity(config);
+  if (engineIdentity.login) {
+    console.log(chalk.dim(`  Engine GitHub identity: ${engineIdentity.login} (${engineIdentity.reason})`));
+  }
+  const identityResults = await checkIdentities(config);
+  for (const r of identityResults.filter((r) => !r.ok)) {
+    const usage = r.usedBy.length > 0 ? ` (used by ${r.usedBy.join(", ")})` : "";
+    console.error(chalk.yellow(`  ⚠ identity ${r.login}: ${r.problem}${usage}`));
+  }
+  const unusable = identityResults.filter((r) => !r.tokenPresent && r.usedBy.length > 0);
+  if (unusable.length > 0) {
+    console.error(
+      chalk.red(
+        `  Cannot start: token environment variables missing for ${unusable.map((r) => r.login).join(", ")}. ` +
+          "Export them (see identities: in the config) or remove the githubUser references.",
+      ),
+    );
+    return 1;
+  }
 
   // Ask about the auto-update channel once on first `ao start` after this
   // feature ships. No-op on subsequent runs (idempotent — guarded by the

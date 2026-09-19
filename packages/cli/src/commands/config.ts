@@ -14,13 +14,21 @@ import {
   getGlobalConfigPath,
   loadGlobalConfig,
   saveGlobalConfig,
+  loadConfigWithPath,
+  findConfigFile,
   UpdateChannelSchema,
   InstallMethodOverrideSchema,
   type GlobalConfig,
   type UpdateChannel,
   type InstallMethodOverride,
 } from "@aoagents/ao-core";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import {
+  diffEffectiveProjects,
+  normalizeConfigDocument,
+  printableConfig,
+} from "../lib/config-normalize.js";
 
 const SUPPORTED_KEYS = ["updateChannel", "installMethod"] as const;
 type SupportedKey = (typeof SUPPORTED_KEYS)[number];
@@ -115,5 +123,75 @@ export function registerConfig(program: Command): void {
         process.exit(1);
       }
       showGet(key);
+    });
+
+  // Fork: effective config after defaults inheritance and validation.
+  config
+    .command("show")
+    .description("Print the effective config (defaults merged into every project)")
+    .option("-p, --project <id>", "Only this project")
+    .option("--json", "Output as JSON")
+    .action((opts: { project?: string; json?: boolean }) => {
+      const { config: loaded, path } = loadConfigWithPath();
+      const printable = printableConfig(loaded);
+      let out: unknown = printable;
+      if (opts.project) {
+        const project = loaded.projects[opts.project];
+        if (!project) {
+          console.error(chalk.red(`Unknown project "${opts.project}" in ${path}`));
+          process.exit(1);
+        }
+        out = { identities: printable["identities"], project: project };
+      }
+      console.log(opts.json ? JSON.stringify(out, null, 2) : stringifyYaml(out, { lineWidth: 0 }));
+    });
+
+  // Fork: hoist repeated project behaviour into defaults.
+  config
+    .command("normalize")
+    .description(
+      "Hoist behaviour repeated in every project into defaults:, fold legacy agent/agentConfig into worker, drop registry-only keys",
+    )
+    .option("--write", "Replace the config file (a timestamped .bak copy is kept)")
+    .option("--out <file>", "Write the normalized YAML to this file instead of stdout")
+    .option("--keep-legacy-agent", "Leave project-level agent/agentConfig in place")
+    .option("--keep-git-identity-steps", "Leave git config user.* postCreate steps in place")
+    .action((opts: { write?: boolean; out?: string; keepLegacyAgent?: boolean; keepGitIdentitySteps?: boolean }) => {
+      const path = findConfigFile();
+      if (!path) {
+        console.error(chalk.red("No config file found (set AO_CONFIG_PATH or run from a project)."));
+        process.exit(1);
+      }
+      const raw = parseYaml(readFileSync(path, "utf-8")) as Record<string, unknown>;
+      const { normalized, changes } = normalizeConfigDocument(raw, {
+        foldLegacyAgent: !opts.keepLegacyAgent,
+        dropGitIdentitySteps: !opts.keepGitIdentitySteps,
+      });
+      const diff = diffEffectiveProjects(raw, normalized);
+      const yaml = stringifyYaml(normalized, { lineWidth: 0 });
+      if (opts.out) {
+        writeFileSync(opts.out, yaml, "utf-8");
+      } else if (opts.write) {
+        const backup = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        copyFileSync(path, backup);
+        writeFileSync(path, yaml, "utf-8");
+        console.error(chalk.dim(`Backup written to ${backup}`));
+      } else {
+        process.stdout.write(yaml);
+      }
+      console.error(chalk.bold(`\n${changes.length} change(s):`));
+      for (const change of changes) console.error(`  - ${change}`);
+      if (diff.length === 0) {
+        console.error(chalk.green("Effective project behaviour is unchanged."));
+      } else {
+        console.error(chalk.yellow(`Effective behaviour differs for ${diff.length} field(s):`));
+        for (const d of diff) {
+          console.error(`  - ${d.project}.${d.key}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`);
+        }
+        console.error(chalk.dim("Expected only for folded legacy agent fields and removed git identity steps."));
+      }
+      if (opts.write || opts.out) {
+        console.error(chalk.dim("Comments in the original file are not preserved."));
+      }
     });
 }
