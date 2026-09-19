@@ -1427,6 +1427,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         issueContext,
         userPrompt: spawnConfig.prompt,
         ...(orchestratorExists && { orchestratorSessionId }),
+        // Only a workspace plugin creates and checks out `branch`; without one
+        // the agent works in project.path and must branch itself.
+        ...(plugins.workspace && { branch }),
       });
 
       const baseDir = getProjectDir(spawnConfig.projectId);

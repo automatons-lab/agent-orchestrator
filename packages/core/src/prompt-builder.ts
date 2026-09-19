@@ -45,7 +45,7 @@ Rules:
 - Use \`--note "<text>"\` to attach a short rationale when the state change is non-obvious.
 
 ## Git Workflow
-- Always create a feature branch from the default branch (never commit directly to it).
+- Never commit directly to the default branch. Work on the branch AO checked out for you (named under Task); create a feature branch yourself only when none was prepared.
 - Use conventional commit messages (feat:, fix:, chore:, etc.).
 - Push your branch and create a PR when the implementation is ready.
 - Keep PRs focused — one issue per PR.
@@ -72,7 +72,7 @@ Explicit reports help the orchestrator track your state accurately. Run these fr
 Do NOT self-report \`done\` or \`terminated\` — AO owns those transitions.
 
 ## Git Workflow
-- Always create a feature branch from the default branch (never commit directly to it).
+- Never commit directly to the default branch. Work on the branch AO checked out for you (named under Task); create a feature branch yourself only when none was prepared.
 - Use conventional commit messages (feat:, fix:, chore:, etc.).`;
 
 // =============================================================================
@@ -94,6 +94,13 @@ export interface PromptBuildConfig {
 
   /** Explicit user prompt (appended last) */
   userPrompt?: string;
+
+  /**
+   * Branch the workspace plugin already created and checked out for this
+   * session. When set, the Task section names it instead of asking the agent
+   * to create one.
+   */
+  branch?: string;
 
   /**
    * Session ID of the orchestrator the worker can message back via `ao send`.
@@ -123,13 +130,21 @@ function buildConfigLayer(config: PromptBuildConfig): string {
     lines.push(`- Tracker: ${project.tracker.plugin}`);
   }
 
+  const branchLine = config.branch
+    ? `Your workspace is already on branch \`${config.branch}\`, created from \`${project.defaultBranch}\`. Commit there; do not create another branch.`
+    : undefined;
+
   if (issueId) {
     const normalizedId = issueId.replace(/^#/, "");
     lines.push(`\n## Task`);
     lines.push(`Work on issue #${normalizedId}`);
     lines.push(
-      `Create a branch named so that it auto-links to the issue tracker (e.g. feat/${normalizedId}).`,
+      branchLine ??
+        `Create a branch named so that it auto-links to the issue tracker (e.g. feat/${normalizedId}).`,
     );
+  } else if (branchLine) {
+    lines.push(`\n## Task`);
+    lines.push(branchLine);
   }
 
   if (issueContext) {
