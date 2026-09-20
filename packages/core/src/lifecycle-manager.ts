@@ -79,6 +79,7 @@ import {
   executeNativeReview,
   resolveReviewerConfig,
   type ResolvedReviewerConfig,
+  countsAsReviewRound,
 } from "./native-review.js";
 import {
   DETECTING_MAX_ATTEMPTS,
@@ -2476,7 +2477,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           .catch(() => {});
       }
     }
-    const rounds = runs.filter((r) => r.status !== "outdated" && r.status !== "cancelled").length;
+    const rounds = store.listRuns({ linkedSessionId: session.id }).filter(countsAsReviewRound).length;
     if (rounds >= reviewer.maxRounds) {
       if (session.metadata["nativeReviewStuck"] !== "1") {
         updateSessionMetadata(session, { nativeReviewStuck: "1" });

@@ -575,10 +575,20 @@ export function contextPrInfo(pr: PRInfo, baseBranch: string, prTitle?: string):
   return { ...pr, title, baseBranch };
 }
 
+const NATIVE_ACTIVE_RUN_STATUSES = new Set<CodeReviewRun["status"]>(["queued", "preparing", "running"]);
+
+/**
+ * A run counts as a review round when it is in progress or delivered a verdict.
+ * The upstream trigger marks every earlier run of the same PR "outdated" as soon
+ * as a newer head is reviewed, so status alone cannot tell rounds apart.
+ */
+export function countsAsReviewRound(run: CodeReviewRun): boolean {
+  if (run.status === "cancelled" || run.status === "failed") return false;
+  return NATIVE_ACTIVE_RUN_STATUSES.has(run.status) || run.verdict !== undefined;
+}
+
 export function reviewRoundFor(store: CodeReviewStore, linkedSessionId: string): number {
-  const prior = store
-    .listRuns({ linkedSessionId })
-    .filter((r) => r.status !== "outdated" && r.status !== "cancelled");
+  const prior = store.listRuns({ linkedSessionId }).filter(countsAsReviewRound);
   return prior.length; // includes the run being executed when called after createRun
 }
 

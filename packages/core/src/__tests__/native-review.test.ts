@@ -7,7 +7,7 @@ import { join } from "node:path";
 vi.mock("../activity-events.js", () => ({ recordActivityEvent: vi.fn() }));
 
 import { validateConfig } from "../config.js";
-import { createCodeReviewStore } from "../code-review-store.js";
+import { createCodeReviewStore, type CodeReviewRun } from "../code-review-store.js";
 import {
   buildReviewPrompt,
   buildReviewSubmission,
@@ -15,6 +15,8 @@ import {
   executeNativeReview,
   formatReviewContext,
   contextPrInfo,
+  countsAsReviewRound,
+  reviewRoundFor,
   parseReviewOutput,
   resolveReviewerConfig,
   reviewerCouldNotRun,
@@ -510,5 +512,29 @@ describe("contextPrInfo", () => {
     expect(own.title).toBe("own title");
     expect(contextPrInfo(restored, "develop").title).toBe("");
     expect(contextPrInfo(restored, "develop").baseBranch).toBe("develop");
+  });
+});
+
+describe("review round counting", () => {
+  const run = (status: CodeReviewRun["status"], verdict?: CodeReviewRun["verdict"]): CodeReviewRun =>
+    ({ id: `run-${status}-${verdict ?? "none"}`, status, ...(verdict ? { verdict } : {}) }) as unknown as CodeReviewRun;
+
+  it("counts delivered verdicts even after the upstream trigger marked them outdated", () => {
+    expect(countsAsReviewRound(run("outdated", "request_changes"))).toBe(true);
+    expect(countsAsReviewRound(run("sent_to_agent", "request_changes"))).toBe(true);
+    expect(countsAsReviewRound(run("running"))).toBe(true);
+  });
+
+  it("ignores superseded, cancelled and failed runs without a delivered verdict", () => {
+    expect(countsAsReviewRound(run("outdated"))).toBe(false);
+    expect(countsAsReviewRound(run("cancelled", "approve"))).toBe(false);
+    expect(countsAsReviewRound(run("failed", "comment"))).toBe(false);
+  });
+
+  it("reviewRoundFor numbers the running review after earlier delivered rounds", () => {
+    const store = {
+      listRuns: () => [run("outdated", "request_changes"), run("outdated"), run("running")],
+    } as unknown as Parameters<typeof reviewRoundFor>[0];
+    expect(reviewRoundFor(store, "s1")).toBe(2);
   });
 });
