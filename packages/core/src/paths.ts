@@ -278,11 +278,26 @@ export function parseTmuxNameV2(tmuxName: string): {
 }
 
 /**
+ * The user's home directory.
+ *
+ * Fork patch: `os.homedir()` reads the real process environment through libuv,
+ * so a `process.env.HOME` set inside a worker thread (every vitest test file
+ * runs in one) is ignored and test writes land in the developer's real home.
+ * Preferring the JS-level variable keeps production behaviour identical — the
+ * engine, the CLI and every shell always have HOME set — while making a test
+ * that points HOME at a temp dir actually hermetic.
+ */
+export function resolveHomeDir(): string {
+  const fromEnv = process.env["HOME"]?.trim() || process.env["USERPROFILE"]?.trim();
+  return fromEnv && fromEnv.length > 0 ? fromEnv : homedir();
+}
+
+/**
  * Expand ~ to home directory.
  */
 export function expandHome(filepath: string): string {
   if (filepath.startsWith("~/")) {
-    return join(homedir(), filepath.slice(2));
+    return join(resolveHomeDir(), filepath.slice(2));
   }
   return filepath;
 }

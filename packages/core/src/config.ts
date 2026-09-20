@@ -24,7 +24,7 @@ import {
   type LoadedConfig,
   type OrchestratorConfig,
 } from "./types.js";
-import { generateSessionPrefix } from "./paths.js";
+import { generateSessionPrefix, resolveHomeDir } from "./paths.js";
 import { GCP_SECRET_NAME_RE } from "./secret-manager.js";
 import { findIdentityKey, identityLogin, resolveAgentRef } from "./identity-lookup.js";
 import { getDefaultRuntime } from "./platform.js";
@@ -574,10 +574,10 @@ const OrchestratorConfigSchema = z.object({
 // CONFIG LOADING
 // =============================================================================
 
-/** Expand ~ to home directory */
+/** Expand ~ to home directory (see paths.ts resolveHomeDir for the HOME rule) */
 function expandHome(filepath: string): string {
   if (filepath.startsWith("~/")) {
-    return join(homedir(), filepath.slice(2));
+    return join(resolveHomeDir(), filepath.slice(2));
   }
   return filepath;
 }
@@ -1188,9 +1188,9 @@ export function findConfigFile(startDir?: string): string | null {
 
   // 5. Legacy home directory locations (backward compatibility)
   const homePaths = [
-    resolve(homedir(), ".agent-orchestrator.yaml"),
-    resolve(homedir(), ".agent-orchestrator.yml"),
-    resolve(homedir(), ".config", "agent-orchestrator", "config.yaml"),
+    resolve(resolveHomeDir(), ".agent-orchestrator.yaml"),
+    resolve(resolveHomeDir(), ".agent-orchestrator.yml"),
+    resolve(resolveHomeDir(), ".config", "agent-orchestrator", "config.yaml"),
   ];
 
   for (const path of homePaths) {

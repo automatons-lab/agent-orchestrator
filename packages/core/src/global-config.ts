@@ -8,7 +8,7 @@ import { atomicWriteFileSync } from "./atomic-write.js";
 import { detectScmPlatform } from "./config-generator.js";
 import { withFileLockSync } from "./file-lock.js";
 import { ProjectResolveError, type ProjectResolveErrorKind } from "./types.js";
-import { generateSessionPrefix } from "./paths.js";
+import { generateSessionPrefix, resolveHomeDir } from "./paths.js";
 import { normalizeOriginUrl } from "./storage-key.js";
 import { getDefaultRuntime } from "./platform.js";
 import { recordActivityEvent } from "./activity-events.js";
@@ -24,11 +24,11 @@ function isWithinRoot(rootPath: string, candidatePath: string): boolean {
 
 function normalizeRegistryProjectPath(projectId: string, rawPath: string): string {
   if (rawPath === "~") {
-    return homedir();
+    return resolveHomeDir();
   }
 
   if (rawPath.startsWith("~/")) {
-    const homePath = homedir();
+    const homePath = resolveHomeDir();
     const resolvedPath = resolve(homePath, rawPath.slice(2));
     if (!isWithinRoot(homePath, resolvedPath)) {
       throw new ProjectResolveError(

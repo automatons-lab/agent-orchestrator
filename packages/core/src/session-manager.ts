@@ -76,6 +76,7 @@ import {
   getProjectWorktreesDir,
   getProjectDir,
   generateSessionName,
+  resolveHomeDir,
 } from "./paths.js";
 import { asValidOpenCodeSessionId } from "./opencode-session-id.js";
 import {
@@ -414,7 +415,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     // session dir gets orphaned in ~/.ao-clones/.
     // NOTE: if plugin is reconfigured with `cloneDir`, this still misses it —
     // a future iteration should ask the plugin for its actual base dir.
-    roots.push(join(homedir(), ".ao-clones", projectId));
+    roots.push(join(resolveHomeDir(), ".ao-clones", projectId));
 
     // Legacy: some worktrees live under ~/.worktrees/{basename}
     const legacyIds = new Set<string>();
@@ -422,7 +423,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     legacyIds.add(basename(projectPath));
 
     for (const id of legacyIds) {
-      roots.push(join(homedir(), ".worktrees", id));
+      roots.push(join(resolveHomeDir(), ".worktrees", id));
     }
 
     return roots;
