@@ -407,14 +407,15 @@ describe("runtime.sendMessage()", () => {
         releaseDelay = resolve;
       });
       vi.mocked(sleep).mockReturnValueOnce(delay);
-      const commandCount = message.includes("\n") || message.length > 200 ? 5 : 3;
+      // + 1 capture-pane after Enter (queue-hint check)
+      const commandCount = message.includes("\n") || message.length > 200 ? 6 : 4;
       for (let i = 0; i < commandCount; i++) mockTmuxSuccess();
 
       const sending = runtime.sendMessage(handle, message);
       try {
         await vi.waitFor(() => expect(sleep).toHaveBeenCalledOnce());
         expect(sleep).toHaveBeenCalledWith(2_000);
-        expect(mockExecFileCustom).toHaveBeenCalledTimes(commandCount - 1);
+        expect(mockExecFileCustom).toHaveBeenCalledTimes(commandCount - 2); // Enter and capture-pane still pending
         expect(mockExecFileCustom).not.toHaveBeenCalledWith(
           "tmux",
           ["send-keys", "-t", "msg-delay", "Enter"],
@@ -426,9 +427,15 @@ describe("runtime.sendMessage()", () => {
       }
 
       expect(mockExecFileCustom).toHaveBeenCalledTimes(commandCount);
-      expect(mockExecFileCustom).toHaveBeenLastCalledWith(
+      expect(mockExecFileCustom).toHaveBeenNthCalledWith(
+        commandCount - 1,
         "tmux",
         ["send-keys", "-t", "msg-delay", "Enter"],
+        expectedTmuxOptions,
+      );
+      expect(mockExecFileCustom).toHaveBeenLastCalledWith(
+        "tmux",
+        ["capture-pane", "-t", "msg-delay", "-p"],
         expectedTmuxOptions,
       );
     },
@@ -438,14 +445,15 @@ describe("runtime.sendMessage()", () => {
     const runtime = create();
     const handle = makeHandle("msg-short");
 
-    // 1: send-keys C-u (clear), 2: send-keys -l text, 3: send-keys Enter
+    // 1: send-keys C-u (clear), 2: send-keys -l text, 3: send-keys Enter, 4: capture-pane (queue hint)
+    mockTmuxSuccess();
     mockTmuxSuccess();
     mockTmuxSuccess();
     mockTmuxSuccess();
 
     await runtime.sendMessage(handle, "hello world");
 
-    expect(mockExecFileCustom).toHaveBeenCalledTimes(3);
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(4);
 
     // Call 0: Clear partial input
     expect(mockExecFileCustom).toHaveBeenNthCalledWith(
@@ -472,21 +480,55 @@ describe("runtime.sendMessage()", () => {
     );
   });
 
+  it("presses Tab when Codex asks to queue the message during a running turn", async () => {
+    const runtime = create();
+    const handle = makeHandle("msg-busy");
+
+    mockTmuxSuccess(); // C-u
+    mockTmuxSuccess(); // send-keys -l text
+    mockTmuxSuccess(); // Enter
+    mockTmuxSuccess("• Working (12s • esc to interrupt)\n› hello world\n  tab to queue message"); // capture-pane
+    mockTmuxSuccess(); // Tab
+
+    await runtime.sendMessage(handle, "hello world");
+
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(5);
+    expect(mockExecFileCustom).toHaveBeenLastCalledWith(
+      "tmux",
+      ["send-keys", "-t", "msg-busy", "Tab"],
+      expectedTmuxOptions,
+    );
+  });
+
+  it("leaves the message alone when the pane shows no queue hint or cannot be read", async () => {
+    const runtime = create();
+    const handle = makeHandle("msg-idle");
+
+    mockTmuxSuccess(); // C-u
+    mockTmuxSuccess(); // send-keys -l text
+    mockTmuxSuccess(); // Enter
+    mockTmuxError("no server running"); // capture-pane fails
+
+    await expect(runtime.sendMessage(handle, "hello world")).resolves.toBeUndefined();
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(4);
+  });
+
   it("uses load-buffer + paste-buffer for long text (> 200 chars)", async () => {
     const runtime = create();
     const handle = makeHandle("msg-long");
     const longText = "x".repeat(250);
 
-    // 1: C-u, 2: load-buffer, 3: paste-buffer, 4: unlinkSync (sync), 5: delete-buffer, 6: Enter
+    // 1: C-u, 2: load-buffer, 3: paste-buffer, 4: unlinkSync (sync), 5: delete-buffer, 6: Enter, 7: capture-pane
     mockTmuxSuccess(); // C-u
     mockTmuxSuccess(); // load-buffer
     mockTmuxSuccess(); // paste-buffer
     mockTmuxSuccess(); // delete-buffer (finally block)
     mockTmuxSuccess(); // Enter
+    mockTmuxSuccess(); // capture-pane (queue hint check)
 
     await runtime.sendMessage(handle, longText);
 
-    expect(mockExecFileCustom).toHaveBeenCalledTimes(5);
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(6);
 
     // Call 0: clear
     expect(mockExecFileCustom).toHaveBeenNthCalledWith(
@@ -539,6 +581,7 @@ describe("runtime.sendMessage()", () => {
     mockTmuxSuccess(); // paste-buffer
     mockTmuxSuccess(); // delete-buffer (finally)
     mockTmuxSuccess(); // Enter
+    mockTmuxSuccess(); // capture-pane (queue hint check)
 
     await runtime.sendMessage(handle, "line1\nline2\nline3");
 

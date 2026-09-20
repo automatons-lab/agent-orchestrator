@@ -17,6 +17,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const TMUX_COMMAND_TIMEOUT_MS = 5_000;
+/** Delay before checking whether the agent accepted Enter or asks for Tab to queue. */
+const QUEUE_HINT_DELAY_MS = 1_500;
+/** Codex footer hint shown when text is pending in the composer during a running turn. */
+const QUEUE_HINT_RE = /tab to queue message/i;
 
 export const manifest = {
   name: "tmux",
@@ -186,6 +190,16 @@ export function create(): Runtime {
       // Give the agent two seconds to process the inserted text before Enter.
       await sleep(2_000);
       await tmux("send-keys", "-t", handle.id, "Enter");
+
+      // Codex ignores Enter while a turn is running and the composer holds a
+      // large paste; its footer then reads "tab to queue message" and Tab
+      // queues the text for after the turn (verified on codex-cli 0.154.0).
+      // Without this the follow-up sits in the composer until the session dies.
+      await sleep(QUEUE_HINT_DELAY_MS);
+      const screen = await tmux("capture-pane", "-t", handle.id, "-p").catch(() => "");
+      if (QUEUE_HINT_RE.test(screen)) {
+        await tmux("send-keys", "-t", handle.id, "Tab");
+      }
     },
 
     async getOutput(handle: RuntimeHandle, lines = 50): Promise<string> {
