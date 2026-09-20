@@ -16,6 +16,7 @@ import {
   formatReviewContext,
   parseReviewOutput,
   resolveReviewerConfig,
+  reviewerCouldNotRun,
   wrapReviewCommand,
   type ReviewOutput,
   type NativeReviewDeps,
@@ -98,10 +99,31 @@ describe("resolveReviewerConfig", () => {
     });
   });
 
+  it("passes a valid agentConfig.sandbox through and ignores unknown values", () => {
+    const withSandbox = { ...project, reviewer: { ...project.reviewer, agentConfig: { sandbox: "danger-full-access" } } };
+    expect(resolveReviewerConfig(withSandbox, config.defaults)?.sandbox).toBe("danger-full-access");
+    const bogus = { ...project, reviewer: { ...project.reviewer, agentConfig: { sandbox: "yolo" } } };
+    expect(resolveReviewerConfig(bogus, config.defaults)?.sandbox).toBeUndefined();
+  });
+
   it("throws when enabled without an identity", () => {
     expect(() =>
       resolveReviewerConfig({ ...project, reviewer: { enabled: true } }, config.defaults),
     ).toThrow(/reviewer\.githubUser is not set/);
+  });
+});
+
+describe("reviewerCouldNotRun", () => {
+  it("flags an empty comment verdict that reports a sandbox failure, nothing else", () => {
+    const broken: ReviewOutput = {
+      verdict: "comment",
+      summary: "The sandbox failed before any read command ran: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.",
+      criteria: [],
+      findings: [],
+    };
+    expect(reviewerCouldNotRun(broken)).toMatch(/bwrap/);
+    expect(reviewerCouldNotRun({ ...broken, summary: "Nothing to add, looks fine." })).toBeNull();
+    expect(reviewerCouldNotRun({ ...sampleOutput, verdict: "comment" })).toBeNull();
   });
 });
 
@@ -373,6 +395,20 @@ describe("executeNativeReview", () => {
       expect(result.run.payloadPath).toMatch(/review\.json$/);
       expect(h.submitted).toHaveLength(0);
       expect(result.submission?.event).toBe("request_changes");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("marks the run failed instead of posting when the reviewer reports it could not run", async () => {
+    const h = makeHarness({
+      agentOutput: JSON.stringify({ verdict: "comment", summary: "bwrap: setting up uid map: Permission denied", criteria: [], findings: [] }),
+    });
+    try {
+      const r = await executeNativeReview(h.deps, h.run);
+      expect(r.run.status).toBe("failed");
+      expect(r.run.terminationReason).toMatch(/reviewer could not run: bwrap/);
+      expect(h.submitted).toHaveLength(0);
     } finally {
       h.cleanup();
     }

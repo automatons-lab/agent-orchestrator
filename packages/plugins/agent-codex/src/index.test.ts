@@ -2217,6 +2217,18 @@ describe.skipIf(process.platform === "win32")("shell wrapper content", () => {
 // ---------------------------------------------------------------------------
 
 describe("getReviewCommand", () => {
+  it("honours the sandbox override", () => {
+    const cmd = agent.getReviewCommand!({
+      workspacePath: "/reviews/ws",
+      promptFile: "/reviews/ws/.ao-review/prompt.md",
+      schemaFile: "/reviews/ws/.ao-review/schema.json",
+      outputFile: "/reviews/ws/.ao-review/result.json",
+      sandbox: "danger-full-access",
+    });
+    expect(cmd).toContain("--sandbox danger-full-access");
+    expect(cmd).not.toContain("read-only");
+  });
+
   const agent = create();
   const review: ReviewCommandConfig = {
     workspacePath: "/reviews/ws",

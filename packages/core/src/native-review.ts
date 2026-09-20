@@ -28,6 +28,7 @@ import type {
   ProjectConfig,
   Review,
   ReviewComment,
+  ReviewSandboxMode,
   ReviewSubmission,
   ReviewSubmissionComment,
   Runtime,
@@ -55,7 +56,15 @@ export interface ResolvedReviewerConfig {
   rulesFile?: string;
   /** Rounds per PR before AO stops spawning reviews and escalates. */
   maxRounds: number;
+  /** Agent sandbox override (`reviewer.agentConfig.sandbox`). */
+  sandbox?: ReviewSandboxMode;
 }
+
+const REVIEW_SANDBOX_MODES: ReadonlySet<string> = new Set([
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+]);
 
 export const DEFAULT_REVIEW_TIMEOUT_MINUTES = 25;
 export const DEFAULT_REVIEW_MAX_CONCURRENT = 1;
@@ -90,6 +99,9 @@ export function resolveReviewerConfig(
     postMode: reviewer.postMode ?? "live",
     ...(reviewer.rulesFile ? { rulesFile: reviewer.rulesFile } : {}),
     maxRounds,
+    ...(typeof agentConfig["sandbox"] === "string" && REVIEW_SANDBOX_MODES.has(agentConfig["sandbox"])
+      ? { sandbox: agentConfig["sandbox"] as ReviewSandboxMode }
+      : {}),
   };
 }
 
@@ -183,6 +195,21 @@ export const ReviewOutputSchema = z.object({
 });
 
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>;
+
+/**
+ * A verdict with no criteria and no findings whose summary reports that the
+ * agent's sandbox or file access failed is not a review; posting it would only
+ * add noise to the PR. Returns the reason when that is the case.
+ */
+export function reviewerCouldNotRun(output: ReviewOutput): string | null {
+  if (output.criteria.length > 0 || output.findings.length > 0) return null;
+  if (output.verdict !== "comment") return null;
+  const summary = output.summary;
+  if (/\bbwrap\b|sandbox (failed|error|could not)|operation not permitted|could not read|unable to read|cannot read/i.test(summary)) {
+    return summary.replace(/\s+/g, " ").slice(0, 300);
+  }
+  return null;
+}
 
 function stripCodeFence(text: string): string {
   const trimmed = text.trim();
@@ -693,6 +720,7 @@ export async function executeNativeReview(
     outputFile,
     ...(reviewer.model ? { model: reviewer.model } : {}),
     ...(reviewer.reasoningEffort ? { reasoningEffort: reviewer.reasoningEffort } : {}),
+    ...(reviewer.sandbox ? { sandbox: reviewer.sandbox } : {}),
   });
   let handle: RuntimeHandle;
   try {
@@ -749,6 +777,8 @@ export async function executeNativeReview(
       );
     }
     output = parseReviewOutput(readFileSync(outputFile, "utf-8"));
+    const couldNotRun = reviewerCouldNotRun(output);
+    if (couldNotRun) throw new Error(`reviewer could not run: ${couldNotRun}`);
   } catch (err) {
     release();
     return fail(err instanceof Error ? err.message : String(err));

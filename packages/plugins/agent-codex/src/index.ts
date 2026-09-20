@@ -633,7 +633,7 @@ function createCodexAgent(): Agent {
       const binary = resolvedBinary ?? "codex";
       const parts: string[] = [shellEscape(binary), "exec"];
       appendNoUpdateCheckFlag(parts);
-      parts.push("--sandbox", "read-only", "--skip-git-repo-check");
+      parts.push("--sandbox", config.sandbox ?? "read-only", "--skip-git-repo-check");
       appendModelFlags(parts, config.model, config.reasoningEffort);
       parts.push("--output-schema", shellEscape(config.schemaFile));
       parts.push("-o", shellEscape(config.outputFile));

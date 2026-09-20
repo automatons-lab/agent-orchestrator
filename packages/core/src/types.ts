@@ -485,6 +485,9 @@ export function isProcessProbeIndeterminate(
  * `promptFile`, keep to read-only tools, never touch the network, and write the
  * final JSON verdict (shaped by `schemaFile`) to `outputFile` before exiting.
  */
+/** OS-level sandbox for the reviewer process (Codex `--sandbox`). */
+export type ReviewSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+
 export interface ReviewCommandConfig {
   workspacePath: string;
   promptFile: string;
@@ -492,6 +495,13 @@ export interface ReviewCommandConfig {
   outputFile: string;
   model?: string;
   reasoningEffort?: string;
+  /**
+   * Sandbox the agent should run under; defaults to read-only. Hosts where the
+   * agent's sandbox cannot start (e.g. Ubuntu's AppArmor restriction on
+   * unprivileged user namespaces breaks Codex's bubblewrap) set
+   * `danger-full-access`; the reviewer still runs with no token in its env.
+   */
+  sandbox?: ReviewSandboxMode;
 }
 
 export interface Agent {

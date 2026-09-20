@@ -62,7 +62,10 @@ defaults:
     maxConcurrent: 1
     postMode: live                    # dry-run writes the review to the run directory only
     # rulesFile: ~/.agent-orchestrator/rules/review.md
+    # agentConfig.sandbox: danger-full-access   # when the agent's own sandbox cannot start on this host
 ```
+
+Codex runs the review under its `read-only` sandbox by default. On hosts where that sandbox cannot start — Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`, which stops Codex's bundled bubblewrap with `bwrap: … Operation not permitted` — either relax that sysctl or set `reviewer.agentConfig.sandbox: danger-full-access`. The reviewer still runs with an allow-listed environment and no token, in a disposable worktree; a run whose only output is a sandbox failure is marked `failed` rather than posted.
 
 What happens on every new head SHA of an open PR (unless CI is failing or the PR is already cleanly approved):
 
