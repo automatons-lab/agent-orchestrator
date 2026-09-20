@@ -9,10 +9,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { OrchestratorConfig, SessionId } from "./types.js";
-import { getObservabilityBaseDir } from "./paths.js";
+import { getObservabilityBaseDir, getLegacyObservabilityBaseDir } from "./paths.js";
 
 export type ObservabilityLevel = "debug" | "info" | "warn" | "error";
 export type ObservabilityOutcome = "success" | "failure";
@@ -214,8 +214,32 @@ function atomicWriteJson(filePath: string, payload: unknown): void {
   renameSync(tmpPath, filePath);
 }
 
+/**
+ * Move a pre-2026-09-20 `{hash}-observability` directory into the
+ * `observability/{hash}` layout, once. Skipped when `AO_OBSERVABILITY_DIR`
+ * points elsewhere (the legacy data belongs to the default home layout) or
+ * when the new directory already exists. Returns true when something moved.
+ */
+export function migrateLegacyObservabilityDir(
+  configPath: string,
+  base: string = getObservabilityBaseDir(configPath),
+): boolean {
+  if (process.env["AO_OBSERVABILITY_DIR"]?.trim()) return false;
+  const legacy = getLegacyObservabilityBaseDir(configPath);
+  if (!existsSync(legacy) || existsSync(base)) return false;
+  try {
+    mkdirSync(dirname(base), { recursive: true });
+    renameSync(legacy, base);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getObservabilityDir(config: OrchestratorConfig): string {
-  const dir = join(getObservabilityBaseDir(config.configPath), "processes");
+  const base = getObservabilityBaseDir(config.configPath);
+  migrateLegacyObservabilityDir(config.configPath, base);
+  const dir = join(base, "processes");
   mkdirSync(dir, { recursive: true });
   return dir;
 }

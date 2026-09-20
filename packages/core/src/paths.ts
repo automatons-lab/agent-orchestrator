@@ -159,12 +159,23 @@ export function getProjectBaseDir(storageKey: string | undefined): string {
 }
 
 /**
- * Get the shared observability base directory for a config.
- * Format: ~/.agent-orchestrator/{hash}-observability
+ * Shared observability base directory for a config (fork layout):
+ * `$AO_OBSERVABILITY_DIR/{hash}` when the variable is set (tests, ad-hoc runs
+ * on config copies), otherwise `~/.agent-orchestrator/observability/{hash}`.
+ * Before 2026-09-20 it was `~/.agent-orchestrator/{hash}-observability` next to
+ * the project data; `getLegacyObservabilityBaseDir` names that location so the
+ * writer can move it once.
  */
 export function getObservabilityBaseDir(configPath: string): string {
   const hash = generateConfigHash(configPath);
-  return join(expandHome("~/.agent-orchestrator"), `${hash}-observability`);
+  const override = process.env["AO_OBSERVABILITY_DIR"]?.trim();
+  const root = override ? expandHome(override) : join(getAoBaseDir(), "observability");
+  return join(root, hash);
+}
+
+/** Pre-2026-09-20 location: `~/.agent-orchestrator/{hash}-observability`. */
+export function getLegacyObservabilityBaseDir(configPath: string): string {
+  return join(getAoBaseDir(), `${generateConfigHash(configPath)}-observability`);
 }
 
 /**

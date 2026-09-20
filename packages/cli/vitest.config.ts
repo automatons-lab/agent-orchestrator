@@ -17,6 +17,7 @@ export default defineConfig({
     },
   ],
   test: {
+    setupFiles: ["./vitest.setup.ts"],
     include: ["__tests__/**/*.test.ts"],
     testTimeout: 10000,
     pool: "threads",

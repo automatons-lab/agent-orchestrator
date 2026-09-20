@@ -31,6 +31,7 @@ export default defineConfig({
     },
   ],
   test: {
+    setupFiles: ["./vitest.setup.ts"],
     alias: {
       // Integration tests import real plugins. These aliases resolve
       // package names to source files so we don't need circular devDeps
