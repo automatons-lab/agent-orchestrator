@@ -324,8 +324,9 @@ async function checkIdentities(
   for (const r of results) {
     const usage = r.usedBy.length > 0 ? `used by ${r.usedBy.join(", ")}` : "unused";
     const label = r.id === r.login ? r.id : `${r.id} (${r.login})`;
+    const via = r.tokenSource === "secret-manager" ? ` (Secret Manager ${r.tokenSecret})` : "";
     if (r.ok) {
-      pass(`identity ${label}: token from ${r.tokenEnv} verified (${usage})`);
+      pass(`identity ${label}: token from ${r.tokenEnv}${via} verified (${usage})`);
     } else if (r.usedBy.length === 0) {
       warn(`identity ${label}: ${r.problem} (${usage})`);
     } else {

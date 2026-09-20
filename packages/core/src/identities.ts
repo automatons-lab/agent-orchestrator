@@ -6,10 +6,12 @@
  * `orchestrator`, `reviewer`) and the engine's own SCM calls (`scm.identity`)
  * reference an identity by key; config validation also resolves the legacy
  * `githubUser: <login>` form. Tokens are read from the environment at use
- * time and are never written to config, traces or logs.
+ * time (filled from Google Secret Manager first when `tokenSecret` is set,
+ * see secret-manager.ts) and are never written to config, traces or logs.
  */
 import { execGhObserved } from "./gh-trace.js";
 import { findIdentityKey, identityLogin } from "./identity-lookup.js";
+import { identityTokenSecretSource, type IdentityTokenSource } from "./secret-manager.js";
 import type { OrchestratorConfig, ProjectConfig } from "./types.js";
 
 export type IdentityRole = "worker" | "orchestrator" | "reviewer";
@@ -22,8 +24,12 @@ export interface ResolvedIdentity {
   /** GitHub login (`githubUser`, else the key). */
   login: string;
   tokenEnv: string;
+  /** Secret Manager secret that fills `tokenEnv` (fork), when declared. */
+  tokenSecret?: string;
   /** Present when the environment variable is set. Never log it. */
   token?: string;
+  /** Where the token came from, when present. */
+  tokenSource?: IdentityTokenSource;
   /** Git author name (defaults to the login). */
   name: string;
   /** Git author email (defaults to the GitHub noreply address). */
@@ -59,11 +65,37 @@ export function resolveIdentity(
     id: key,
     login,
     tokenEnv: entry.tokenEnv,
-    ...(token !== undefined ? { token } : {}),
+    ...(entry.tokenSecret !== undefined ? { tokenSecret: entry.tokenSecret } : {}),
+    ...(token !== undefined ? { token, tokenSource: tokenSourceOf(entry.tokenEnv) } : {}),
     name: entry.name ?? login,
     email: entry.email ?? `${login}@users.noreply.github.com`,
     ...(entry.agent !== undefined ? { agent: entry.agent } : {}),
   };
+}
+
+function tokenSourceOf(tokenEnv: string): IdentityTokenSource {
+  return identityTokenSecretSource(tokenEnv) !== undefined ? "secret-manager" : "env";
+}
+
+/**
+ * Problem text for an identity whose token variable is unset; names the
+ * Secret Manager fallback when one is declared so the fix is obvious.
+ */
+export function missingTokenProblem(
+  identity: Pick<ResolvedIdentity, "tokenEnv" | "tokenSecret">,
+): string {
+  const base = `environment variable ${identity.tokenEnv} is not set`;
+  return identity.tokenSecret === undefined
+    ? base
+    : `${base} and Secret Manager secret ${identity.tokenSecret} was not resolved ` +
+        "(needs the GCE metadata server, or export the variable)";
+}
+
+/** Suffix for messages that name where a present token came from. */
+function tokenSourceSuffix(identity: Pick<ResolvedIdentity, "tokenSecret" | "tokenSource">): string {
+  return identity.tokenSource === "secret-manager" && identity.tokenSecret !== undefined
+    ? ` (Secret Manager ${identity.tokenSecret})`
+    : "";
 }
 
 export function getIdentityToken(
@@ -121,7 +153,7 @@ export function roleIdentityEnvironment(
   }
   if (identity.token === undefined) {
     throw new Error(
-      `Identity "${identity.id}": environment variable ${identity.tokenEnv} is not set ` +
+      `Identity "${identity.id}": ${missingTokenProblem(identity)} ` +
         `(needed by project "${project.name}" role ${role})`,
     );
   }
@@ -167,13 +199,21 @@ export function applyEngineIdentity(
   }
   const login = identity.login;
   if (identity.token === undefined) {
-    return { login, applied: false, reason: `${identity.tokenEnv} is not set` };
+    const reason =
+      identity.tokenSecret === undefined
+        ? `${identity.tokenEnv} is not set`
+        : missingTokenProblem(identity);
+    return { login, applied: false, reason };
   }
   if (env["GH_TOKEN"] === identity.token) {
     return { login, applied: false, reason: "GH_TOKEN already matches" };
   }
   env["GH_TOKEN"] = identity.token;
-  return { login, applied: true, reason: `GH_TOKEN exported from ${identity.tokenEnv}` };
+  return {
+    login,
+    applied: true,
+    reason: `GH_TOKEN exported from ${identity.tokenEnv}${tokenSourceSuffix(identity)}`,
+  };
 }
 
 /** Where each declared identity (by key) is referenced ("defaults.worker", "projects.x.reviewer", ...). */
@@ -217,6 +257,10 @@ export interface IdentityCheck {
   /** GitHub login the identity claims. */
   login: string;
   tokenEnv: string;
+  /** Secret Manager secret that fills `tokenEnv`, when declared. */
+  tokenSecret?: string;
+  /** Where the present token came from. */
+  tokenSource?: IdentityTokenSource;
   tokenPresent: boolean;
   /** Login GitHub reports for the token (when verified). */
   resolvedLogin?: string;
@@ -256,13 +300,20 @@ export async function checkIdentities(
     if (!identity) continue;
     const usedBy = usage[key] ?? [];
     const login = identity.login;
-    const base = { id: key, login, tokenEnv: identity.tokenEnv, usedBy };
+    const base = {
+      id: key,
+      login,
+      tokenEnv: identity.tokenEnv,
+      ...(identity.tokenSecret !== undefined ? { tokenSecret: identity.tokenSecret } : {}),
+      ...(identity.tokenSource !== undefined ? { tokenSource: identity.tokenSource } : {}),
+      usedBy,
+    };
     if (identity.token === undefined) {
       results.push({
         ...base,
         tokenPresent: false,
         ok: false,
-        problem: `environment variable ${identity.tokenEnv} is not set`,
+        problem: missingTokenProblem(identity),
       });
       continue;
     }

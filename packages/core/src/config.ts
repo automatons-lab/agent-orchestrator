@@ -25,6 +25,7 @@ import {
   type OrchestratorConfig,
 } from "./types.js";
 import { generateSessionPrefix } from "./paths.js";
+import { GCP_SECRET_NAME_RE } from "./secret-manager.js";
 import { findIdentityKey, identityLogin, resolveAgentRef } from "./identity-lookup.js";
 import { getDefaultRuntime } from "./platform.js";
 import {
@@ -301,14 +302,24 @@ const AgentProfilesSchema = z
 /**
  * One identity: who a role is on GitHub and which agent profile it runs.
  * Tokens never live in the config file; `tokenEnv` names the environment
- * variable that carries them. Roles reference an identity by key and inherit
- * its login and agent, so each is declared once for every role and project.
+ * variable that carries them, and `tokenSecret` may name the Google Secret
+ * Manager secret AO exports into that variable when it is unset. Roles
+ * reference an identity by key and inherit its login and agent, so each is
+ * declared once for every role and project.
  */
 const IdentityConfigSchema = z
   .object({
     tokenEnv: z
       .string()
       .min(1, "identities.<id>.tokenEnv must name an environment variable"),
+    /** Secret Manager secret that fills `tokenEnv` when the variable is unset (fork). */
+    tokenSecret: z
+      .string()
+      .regex(
+        GCP_SECRET_NAME_RE,
+        "identities.<id>.tokenSecret must be projects/<project>/secrets/<name>[/versions/<version>]",
+      )
+      .optional(),
     /** GitHub login. Defaults to the identity key. */
     githubUser: z
       .string()

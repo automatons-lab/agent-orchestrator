@@ -1664,12 +1664,15 @@ export interface AgentProfileConfig {
 /**
  * An identity AO can act as (fork): a GitHub user plus the agent profile that
  * user runs. Keyed by a free id under `identities:`; the token is read from
- * the environment variable `tokenEnv` and never stored in the config file.
+ * the environment variable `tokenEnv` (filled from the Google Secret Manager
+ * secret `tokenSecret` when unset) and never stored in the config file.
  * Roles reference an identity by key and inherit `githubUser` and the agent
  * unless they set their own.
  */
 export interface IdentityConfig {
   tokenEnv: string;
+  /** Secret Manager secret `projects/<p>/secrets/<name>[/versions/<v>]` that fills `tokenEnv`. */
+  tokenSecret?: string;
   /** GitHub login; defaults to the identity key. */
   githubUser?: string;
   /** Git author name; defaults to the login. */

@@ -44,6 +44,7 @@ describe("resolveIdentity", () => {
       login: "neo",
       tokenEnv: "NEO_TOKEN",
       token: "tok-neo",
+      tokenSource: "env",
       name: "neo",
       email: "neo@users.noreply.github.com",
     });
@@ -71,6 +72,7 @@ describe("resolveIdentity", () => {
       login: "neo-automaton",
       tokenEnv: "NEO_TOKEN",
       token: "t",
+      tokenSource: "env",
       name: "neo-automaton",
       email: "neo-automaton@users.noreply.github.com",
       agent: "codex-coder",

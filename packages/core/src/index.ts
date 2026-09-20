@@ -27,6 +27,7 @@ export {
 // GitHub identities (fork): who each role acts as, engine token, doctor checks
 export * from "./identities.js";
 export * from "./identity-lookup.js";
+export * from "./secret-manager.js";
 
 // AO-native reviewer (fork): headless review runs in tmux, verdict posting
 export * from "./native-review.js";

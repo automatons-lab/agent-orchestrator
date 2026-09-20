@@ -21,6 +21,7 @@ import { registerCompletion } from "./commands/completion.js";
 import { registerEvents } from "./commands/events.js";
 import { registerConfig } from "./commands/config.js";
 import { getConfigInstruction } from "./lib/config-instruction.js";
+import { registerIdentitySecretsHook } from "./lib/identity-secrets.js";
 import { getCliVersion } from "./options/version.js";
 
 export function createProgram(): Command {
@@ -62,6 +63,9 @@ export function createProgram(): Command {
     .action(() => {
       console.log(getConfigInstruction());
     });
+
+  // Fork: identity tokens from Google Secret Manager before identity-using commands.
+  registerIdentitySecretsHook(program);
 
   return program;
 }
