@@ -3,6 +3,9 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// Keep the shared activity-events database out of unit tests.
+vi.mock("../activity-events.js", () => ({ recordActivityEvent: vi.fn() }));
+
 import { validateConfig } from "../config.js";
 import { createCodeReviewStore } from "../code-review-store.js";
 import {
