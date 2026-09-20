@@ -169,3 +169,17 @@ test("buildConfigEntityArgs maps tool params to ao CLI flags and always asks for
   );
   assert.throws(() => buildConfigEntityArgs("project", "rm", {}), /id is required/);
 });
+
+test("buildDefaultsArgs builds ao defaults set/unset calls and always asks for JSON", async () => {
+  const { buildDefaultsArgs } = await import("./index.ts");
+  assert.deepEqual(
+    buildDefaultsArgs({ key: "reviewer.enabled", value: "true", unset: ["--reviewer.postMode", "worker.agentConfig"], dryRun: true }),
+    ["defaults", "set", "reviewer.enabled", "true", "--unset", "reviewer.postMode", "--unset", "worker.agentConfig", "--dry-run", "--json"],
+  );
+  assert.deepEqual(buildDefaultsArgs({ key: "reviewer.timeoutMinutes", value: 25 }), ["defaults", "set", "reviewer.timeoutMinutes", "25", "--json"]);
+  assert.deepEqual(buildDefaultsArgs({ unset: ["branchNameTemplate", "reviewer.rulesFile"] }), ["defaults", "unset", "branchNameTemplate", "--unset", "reviewer.rulesFile", "--json"]);
+  assert.throws(() => buildDefaultsArgs({ key: "reviewer.enabled" }), /pass key \+ value/);
+  assert.throws(() => buildDefaultsArgs({ key: "x", unset: ["y"] }), /pass value together with key/);
+  assert.throws(() => buildDefaultsArgs({ key: "x", value: "-1" }), /must not start with/);
+  assert.throws(() => buildDefaultsArgs({}), /pass key \+ value/);
+});

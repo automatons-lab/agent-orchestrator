@@ -2,7 +2,7 @@
   "id": "agent-orchestrator",
   "name": "Agent Orchestrator",
   "description": "Control and monitor Agent Orchestrator (AO) from OpenClaw. Slash commands, AI tools, issue board scanning, proactive planning, and health monitoring.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -86,7 +86,8 @@
       "ao_identity_update",
       "ao_identity_remove",
       "ao_identity_list",
-      "ao_config_show"
+      "ao_config_show",
+      "ao_defaults_set"
     ]
   }
 }

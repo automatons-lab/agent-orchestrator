@@ -183,6 +183,33 @@ const CONFIG_ENTITY_FLAGS: Record<ConfigEntity, Record<string, string>> = {
  * (JSON is valid YAML, so numbers, booleans, lists and quoted strings survive),
  * `unset` becomes repeated `--unset`. Always asks for `--json`.
  */
+/**
+ * `ao defaults set <key> <value> [--unset k]…` / `ao defaults unset <key> [--unset k]…`
+ * from tool parameters. `value` is passed as text and YAML-parsed by the CLI.
+ */
+export function buildDefaultsArgs(params: Record<string, unknown>): string[] {
+  const key = typeof params["key"] === "string" ? sanitizeCliArg(params["key"].trim()) : "";
+  const rawValue = params["value"];
+  const value = rawValue === undefined || rawValue === null ? undefined : String(rawValue);
+  const unset = Array.isArray(params["unset"]) ? params["unset"].map((k) => sanitizeCliArg(String(k))).filter(Boolean) : [];
+  const args: string[] = ["defaults"];
+  if (key && value !== undefined) {
+    if (value.startsWith("-")) throw new Error("value must not start with '-' (quote it in the YAML sense, e.g. '\"-1\"' is not supported here)");
+    args.push("set", key, value);
+    for (const k of unset) args.push("--unset", k);
+  } else if (unset.length > 0) {
+    if (key) throw new Error("pass value together with key; to remove keys use unset only");
+    const [first, ...rest] = unset as [string, ...string[]];
+    args.push("unset", first);
+    for (const k of rest) args.push("--unset", k);
+  } else {
+    throw new Error("pass key + value to set a key, or unset: [keys] to remove keys");
+  }
+  if (params["dryRun"] === true) args.push("--dry-run");
+  args.push("--json");
+  return args;
+}
+
 export function buildConfigEntityArgs(
   entity: ConfigEntity,
   action: ConfigEntityAction,
@@ -1831,6 +1858,38 @@ export default function (api: PluginApi) {
       return result.ok
         ? { content: [{ type: "text", text: result.output }] }
         : { content: [{ type: "text", text: `ao config show failed: ${result.error}` }], isError: true };
+    },
+  });
+
+  api.registerTool({
+    name: "ao_defaults_set",
+    description:
+      "Set or remove keys of the defaults: block every AO project inherits (dotted keys such as reviewer.enabled, " +
+      "worker.agent, reviewer.agentConfig.reasoningEffort, branchNameTemplate). key + value sets one key (value is text, " +
+      "YAML-parsed: true/false, numbers, [lists], {maps}; anything else stays a string); unset removes keys. " +
+      "Use ao_config_show to read the effective result. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Dotted key under defaults:, e.g. reviewer.enabled" },
+        value: { type: "string", description: "New value as text (YAML-parsed), e.g. true, 25, codex-coder, '[a, b]'" },
+        unset: { type: "array", items: { type: "string" }, description: "Keys under defaults: to remove (dotted)" },
+        dryRun: { type: "boolean", description: "Validate and show the result without writing" },
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      let args: string[];
+      try {
+        args = buildDefaultsArgs(params);
+      } catch (err) {
+        return { content: [{ type: "text", text: `Invalid parameters: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+      const result = await tryRunAo(config, args, 60_000);
+      if (!result.ok) {
+        return { content: [{ type: "text", text: `ao ${args.slice(0, 2).join(" ")} failed: ${result.error}` }], isError: true };
+      }
+      const suffix = params["dryRun"] === true ? "" : "\n\nRestart ao-engine at 0 active sessions to apply (config is read at startup).";
+      return { content: [{ type: "text", text: result.output + suffix }] };
     },
   });
 
