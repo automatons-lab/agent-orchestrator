@@ -13,6 +13,7 @@ import {
   type PluginSlot,
   checkIdentities as checkIdentityTokens,
   engineIdentityLogin,
+  engineIdentityRef,
 } from "@aoagents/ao-core";
 import { runNotifyTest } from "../lib/notify-test.js";
 import { runRepoScript } from "../lib/script-runner.js";
@@ -318,19 +319,22 @@ async function checkIdentities(
   const results = await checkIdentityTokens(config);
   for (const r of results) {
     const usage = r.usedBy.length > 0 ? `used by ${r.usedBy.join(", ")}` : "unused";
+    const label = r.id === r.login ? r.id : `${r.id} (${r.login})`;
     if (r.ok) {
-      pass(`identity ${r.login}: token from ${r.tokenEnv} verified (${usage})`);
+      pass(`identity ${label}: token from ${r.tokenEnv} verified (${usage})`);
     } else if (r.usedBy.length === 0) {
-      warn(`identity ${r.login}: ${r.problem} (${usage})`);
+      warn(`identity ${label}: ${r.problem} (${usage})`);
     } else {
-      fail(`identity ${r.login}: ${r.problem} (${usage})`);
+      fail(`identity ${label}: ${r.problem} (${usage})`);
     }
   }
-  const engine = engineIdentityLogin(config);
+  const engine = engineIdentityRef(config);
+  const engineLogin = engineIdentityLogin(config);
   if (engine) {
-    pass(`engine SCM identity: ${engine} (defaults.scm.githubUser)`);
+    const label = engineLogin && engineLogin !== engine ? `${engine} (${engineLogin})` : engine;
+    pass(`engine SCM identity: ${label} (defaults.scm.identity)`);
   } else {
-    warn("defaults.scm.githubUser not set — engine API calls use the ambient gh login / GH_TOKEN");
+    warn("defaults.scm.identity not set — engine API calls use the ambient gh login / GH_TOKEN");
   }
 }
 

@@ -228,7 +228,7 @@ export const GlobalConfigSchema = z
       })
       .passthrough()
       .default({}),
-    /** Fork: GitHub identities (login → { tokenEnv, name?, email? }). */
+    /** Fork: identities (id → { tokenEnv, githubUser?, agent?, model?, reasoningEffort?, permissions?, name?, email? }). */
     identities: z.record(z.object({ tokenEnv: z.string() }).passthrough()).optional(),
     /** Project registry — map key is the canonical project ID. */
     projects: z.record(GlobalProjectEntrySchema).default({}),

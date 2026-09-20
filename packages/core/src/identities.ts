@@ -1,12 +1,15 @@
 /**
- * GitHub identities (fork).
+ * Identities (fork).
  *
- * `identities:` maps a GitHub login to the environment variable that holds its
- * token. Roles (`worker`, `orchestrator`, `reviewer`) and the engine's own SCM
- * calls (`scm.githubUser`) name one of those logins. Tokens are read from the
- * environment at use time and are never written to config, traces or logs.
+ * `identities:` maps an id to a GitHub login, the environment variable that
+ * holds its token and the agent settings it runs with. Roles (`worker`,
+ * `orchestrator`, `reviewer`) and the engine's own SCM calls (`scm.identity`)
+ * reference an identity by key; config validation also resolves the legacy
+ * `githubUser: <login>` form. Tokens are read from the environment at use
+ * time and are never written to config, traces or logs.
  */
 import { execGhObserved } from "./gh-trace.js";
+import { findIdentityKey, identityLogin } from "./identity-lookup.js";
 import type { OrchestratorConfig, ProjectConfig } from "./types.js";
 
 export type IdentityRole = "worker" | "orchestrator" | "reviewer";
@@ -14,6 +17,9 @@ export type IdentityRole = "worker" | "orchestrator" | "reviewer";
 export const IDENTITY_ROLES: readonly IdentityRole[] = ["worker", "orchestrator", "reviewer"];
 
 export interface ResolvedIdentity {
+  /** Key under `identities:`. */
+  id: string;
+  /** GitHub login (`githubUser`, else the key). */
   login: string;
   tokenEnv: string;
   /** Present when the environment variable is set. Never log it. */
@@ -22,34 +28,61 @@ export interface ResolvedIdentity {
   name: string;
   /** Git author email (defaults to the GitHub noreply address). */
   email: string;
+  /** Agent settings the identity carries, if any. */
+  agent?: string;
+  model?: string;
+  reasoningEffort?: string;
+  permissions?: string;
 }
 
 type IdentityConfigSource = Pick<OrchestratorConfig, "identities">;
 
+/**
+ * Resolve an identity by key, or by login when exactly one identity carries
+ * it. Undefined when nothing matches or the login is ambiguous.
+ */
 export function resolveIdentity(
   config: IdentityConfigSource,
-  login: string,
+  ref: string,
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedIdentity | undefined {
-  const entry = config.identities?.[login];
+  let key: string | undefined;
+  try {
+    key = findIdentityKey(config.identities, ref);
+  } catch {
+    return undefined;
+  }
+  if (key === undefined) return undefined;
+  const entry = config.identities?.[key];
   if (!entry) return undefined;
+  const login = identityLogin(config.identities, key);
   const raw = env[entry.tokenEnv];
   const token = typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
   return {
+    id: key,
     login,
     tokenEnv: entry.tokenEnv,
     ...(token !== undefined ? { token } : {}),
     name: entry.name ?? login,
     email: entry.email ?? `${login}@users.noreply.github.com`,
+    ...(entry.agent !== undefined ? { agent: entry.agent } : {}),
+    ...(entry.model !== undefined ? { model: entry.model } : {}),
+    ...(entry.reasoningEffort !== undefined ? { reasoningEffort: entry.reasoningEffort } : {}),
+    ...(entry.permissions !== undefined ? { permissions: entry.permissions } : {}),
   };
 }
 
 export function getIdentityToken(
   config: IdentityConfigSource,
-  login: string,
+  ref: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  return resolveIdentity(config, login, env)?.token;
+  return resolveIdentity(config, ref, env)?.token;
+}
+
+/** Identity reference of a role (key, or legacy login) after validation. */
+export function roleIdentityRef(project: ProjectConfig, role: IdentityRole): string | undefined {
+  return project[role]?.identity ?? project[role]?.githubUser;
 }
 
 /** Login a role acts as, after defaults were merged into the project. */
@@ -75,7 +108,7 @@ export function identityEnvironment(identity: ResolvedIdentity): Record<string, 
 
 /**
  * Environment for a role session of `project`, or `{}` when the role has no
- * `githubUser`. Throws when the identity is undeclared or its token env var is
+ * identity. Throws when the identity is undeclared or its token env var is
  * unset, so a spawn fails loudly instead of pushing as the wrong user.
  */
 export function roleIdentityEnvironment(
@@ -84,26 +117,31 @@ export function roleIdentityEnvironment(
   role: IdentityRole,
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  const login = roleIdentityLogin(project, role);
-  if (login === undefined) return {};
-  const identity = resolveIdentity(config, login, env);
+  const ref = roleIdentityRef(project, role);
+  if (ref === undefined) return {};
+  const identity = resolveIdentity(config, ref, env);
   if (!identity) {
     throw new Error(
-      `Project "${project.name}": ${role}.githubUser "${login}" is not declared under identities:`,
+      `Project "${project.name}": ${role}.identity "${ref}" is not declared under identities:`,
     );
   }
   if (identity.token === undefined) {
     throw new Error(
-      `Identity "${login}": environment variable ${identity.tokenEnv} is not set ` +
+      `Identity "${identity.id}": environment variable ${identity.tokenEnv} is not set ` +
         `(needed by project "${project.name}" role ${role})`,
     );
   }
   return identityEnvironment(identity);
 }
 
+/** Identity reference (key, or legacy login) the engine itself uses for SCM/tracker API calls. */
+export function engineIdentityRef(config: OrchestratorConfig): string | undefined {
+  return config.defaults?.scm?.identity ?? config.defaults?.scm?.githubUser;
+}
+
 /**
  * Login the engine itself uses for SCM/tracker API calls. Only the default
- * is honoured process-wide; per-project `scm.githubUser` overrides are applied
+ * is honoured process-wide; per-project `scm.identity` overrides are applied
  * by plugins that support per-call auth (e.g. review submission).
  */
 export function engineIdentityLogin(config: OrchestratorConfig): string | undefined {
@@ -125,14 +163,15 @@ export function applyEngineIdentity(
   config: OrchestratorConfig,
   env: NodeJS.ProcessEnv = process.env,
 ): EngineIdentityResult {
-  const login = engineIdentityLogin(config);
-  if (login === undefined) {
-    return { applied: false, reason: "no defaults.scm.githubUser configured" };
+  const ref = engineIdentityRef(config);
+  if (ref === undefined) {
+    return { applied: false, reason: "no defaults.scm.identity configured" };
   }
-  const identity = resolveIdentity(config, login, env);
+  const identity = resolveIdentity(config, ref, env);
   if (!identity) {
-    return { login, applied: false, reason: `identity "${login}" is not declared` };
+    return { login: ref, applied: false, reason: `identity "${ref}" is not declared` };
   }
+  const login = identity.login;
   if (identity.token === undefined) {
     return { login, applied: false, reason: `${identity.tokenEnv} is not set` };
   }
@@ -143,30 +182,45 @@ export function applyEngineIdentity(
   return { login, applied: true, reason: `GH_TOKEN exported from ${identity.tokenEnv}` };
 }
 
-/** Where each declared identity is referenced ("defaults.worker", "projects.x.reviewer", ...). */
+/** Where each declared identity (by key) is referenced ("defaults.worker", "projects.x.reviewer", ...). */
 export function identityUsage(config: OrchestratorConfig): Record<string, string[]> {
   const usage: Record<string, string[]> = {};
-  for (const login of Object.keys(config.identities ?? {})) usage[login] = [];
-  const add = (login: string | undefined, where: string): void => {
-    if (login === undefined) return;
-    (usage[login] ??= []).push(where);
-  };
-  add(config.defaults?.scm?.githubUser, "defaults.scm");
-  for (const role of IDENTITY_ROLES) add(config.defaults?.[role]?.githubUser, `defaults.${role}`);
-  for (const [id, project] of Object.entries(config.projects)) {
-    if (project.scm?.githubUser !== config.defaults?.scm?.githubUser) {
-      add(project.scm?.githubUser, `projects.${id}.scm`);
+  for (const key of Object.keys(config.identities ?? {})) usage[key] = [];
+  const keyOf = (ref: string | undefined): string | undefined => {
+    if (ref === undefined) return undefined;
+    try {
+      return findIdentityKey(config.identities, ref) ?? ref;
+    } catch {
+      return ref;
     }
+  };
+  const add = (ref: string | undefined, where: string): void => {
+    const key = keyOf(ref);
+    if (key === undefined) return;
+    (usage[key] ??= []).push(where);
+  };
+  const defaultsScm = keyOf(config.defaults?.scm?.identity ?? config.defaults?.scm?.githubUser);
+  add(defaultsScm, "defaults.scm");
+  const defaultsRole: Partial<Record<IdentityRole, string | undefined>> = {};
+  for (const role of IDENTITY_ROLES) {
+    defaultsRole[role] = keyOf(config.defaults?.[role]?.identity ?? config.defaults?.[role]?.githubUser);
+    add(defaultsRole[role], `defaults.${role}`);
+  }
+  for (const [id, project] of Object.entries(config.projects)) {
+    const scm = keyOf(project.scm?.identity ?? project.scm?.githubUser);
+    if (scm !== defaultsScm) add(scm, `projects.${id}.scm`);
     for (const role of IDENTITY_ROLES) {
-      if (project[role]?.githubUser !== config.defaults?.[role]?.githubUser) {
-        add(project[role]?.githubUser, `projects.${id}.${role}`);
-      }
+      const key = keyOf(project[role]?.identity ?? project[role]?.githubUser);
+      if (key !== defaultsRole[role]) add(key, `projects.${id}.${role}`);
     }
   }
   return usage;
 }
 
 export interface IdentityCheck {
+  /** Key under `identities:`. */
+  id: string;
+  /** GitHub login the identity claims. */
   login: string;
   tokenEnv: string;
   tokenPresent: boolean;
@@ -203,11 +257,12 @@ export async function checkIdentities(
   const exec = options.exec ?? defaultGhExec;
   const usage = identityUsage(config);
   const results: IdentityCheck[] = [];
-  for (const login of Object.keys(config.identities ?? {})) {
-    const identity = resolveIdentity(config, login, env);
+  for (const key of Object.keys(config.identities ?? {})) {
+    const identity = resolveIdentity(config, key, env);
     if (!identity) continue;
-    const usedBy = usage[login] ?? [];
-    const base = { login, tokenEnv: identity.tokenEnv, usedBy };
+    const usedBy = usage[key] ?? [];
+    const login = identity.login;
+    const base = { id: key, login, tokenEnv: identity.tokenEnv, usedBy };
     if (identity.token === undefined) {
       results.push({
         ...base,

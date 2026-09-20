@@ -91,6 +91,7 @@ describe("resolveReviewerConfig", () => {
   it("returns null when disabled and merges role settings when enabled", () => {
     expect(resolveReviewerConfig({ ...project, reviewer: undefined }, config.defaults)).toBeNull();
     expect(resolveReviewerConfig(project, config.defaults, 4)).toEqual({
+      identity: "trinity",
       githubUser: "trinity",
       agent: "codex",
       model: "gpt-6-astra",

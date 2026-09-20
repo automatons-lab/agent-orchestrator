@@ -881,14 +881,14 @@ async function runStartup(
   const identityResults = await checkIdentities(config);
   for (const r of identityResults.filter((r) => !r.ok)) {
     const usage = r.usedBy.length > 0 ? ` (used by ${r.usedBy.join(", ")})` : "";
-    console.error(chalk.yellow(`  ⚠ identity ${r.login}: ${r.problem}${usage}`));
+    console.error(chalk.yellow(`  ⚠ identity ${r.id}: ${r.problem}${usage}`));
   }
   const unusable = identityResults.filter((r) => !r.tokenPresent && r.usedBy.length > 0);
   if (unusable.length > 0) {
     console.error(
       chalk.red(
-        `  Cannot start: token environment variables missing for ${unusable.map((r) => r.login).join(", ")}. ` +
-          "Export them (see identities: in the config) or remove the githubUser references.",
+        `  Cannot start: token environment variables missing for ${unusable.map((r) => r.id).join(", ")}. ` +
+          "Export them (see identities: in the config) or remove the identity references.",
       ),
     );
     return 1;

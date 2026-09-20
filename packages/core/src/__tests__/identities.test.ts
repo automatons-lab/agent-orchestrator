@@ -40,6 +40,7 @@ describe("resolveIdentity", () => {
     const cfg = config();
     const env = { NEO_TOKEN: " tok-neo " };
     expect(resolveIdentity(cfg, "neo", env)).toEqual({
+      id: "neo",
       login: "neo",
       tokenEnv: "NEO_TOKEN",
       token: "tok-neo",
@@ -47,12 +48,39 @@ describe("resolveIdentity", () => {
       email: "neo@users.noreply.github.com",
     });
     expect(resolveIdentity(cfg, "trinity", {})).toEqual({
+      id: "trinity",
       login: "trinity",
       tokenEnv: "TRI_TOKEN",
       name: "Trinity",
       email: "trinity@example.com",
     });
     expect(resolveIdentity(cfg, "ghost", env)).toBeUndefined();
+  });
+
+  it("resolves a profile by key or by its login and carries the agent settings", () => {
+    const cfg = validateConfig({
+      identities: {
+        neo: { tokenEnv: "NEO_TOKEN", githubUser: "neo-automaton", agent: "codex", model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
+        "neo-claude": { tokenEnv: "NEO_TOKEN", githubUser: "neo-automaton", agent: "claude-code" },
+        tri: { tokenEnv: "TRI_TOKEN", githubUser: "trinity-automaton" },
+      },
+      projects: {},
+    });
+    expect(resolveIdentity(cfg, "neo", { NEO_TOKEN: "t" })).toEqual({
+      id: "neo",
+      login: "neo-automaton",
+      tokenEnv: "NEO_TOKEN",
+      token: "t",
+      name: "neo-automaton",
+      email: "neo-automaton@users.noreply.github.com",
+      agent: "codex",
+      model: "gpt-6-astra",
+      reasoningEffort: "xhigh",
+      permissions: "permissionless",
+    });
+    expect(resolveIdentity(cfg, "trinity-automaton", {})?.id).toBe("tri");
+    // two profiles share the login: only the key can tell them apart
+    expect(resolveIdentity(cfg, "neo-automaton", {})).toBeUndefined();
   });
 });
 
@@ -100,7 +128,7 @@ describe("applyEngineIdentity", () => {
   it("reports why nothing was applied", () => {
     expect(applyEngineIdentity(config(), {}).reason).toBe("NEO_TOKEN is not set");
     const noScm = validateConfig({ projects: {} });
-    expect(applyEngineIdentity(noScm, {}).reason).toMatch(/no defaults\.scm\.githubUser/);
+    expect(applyEngineIdentity(noScm, {}).reason).toMatch(/no defaults\.scm\.identity/);
   });
 });
 
@@ -110,6 +138,17 @@ describe("identityUsage", () => {
       neo: ["defaults.scm", "defaults.worker", "projects.solo.reviewer"],
       trinity: ["defaults.reviewer", "projects.solo.worker"],
     });
+  });
+
+  it("keys usage by identity id even when roles reference the login", () => {
+    const cfg = validateConfig({
+      identities: { neo: { tokenEnv: "A", githubUser: "neo-automaton" }, tri: { tokenEnv: "B", githubUser: "trinity-automaton" } },
+      defaults: { scm: { plugin: "github", identity: "neo" }, worker: { githubUser: "neo-automaton" } },
+      projects: {
+        app: { path: "/repos/app", repo: "org/app", defaultBranch: "main", sessionPrefix: "app", reviewer: { identity: "tri" } },
+      },
+    });
+    expect(identityUsage(cfg)).toEqual({ neo: ["defaults.scm", "defaults.worker"], tri: ["projects.app.reviewer"] });
   });
 });
 
@@ -128,7 +167,7 @@ describe("checkIdentities", () => {
       ["api", "user", "--jq", ".login"],
     ]);
     expect(results).toEqual([
-      expect.objectContaining({ login: "neo", tokenPresent: true, resolvedLogin: "neo", ok: true }),
+      expect.objectContaining({ id: "neo", login: "neo", tokenPresent: true, resolvedLogin: "neo", ok: true }),
       expect.objectContaining({
         login: "trinity",
         ok: false,

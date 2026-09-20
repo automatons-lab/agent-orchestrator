@@ -150,13 +150,15 @@ export function registerConfig(program: Command): void {
   config
     .command("normalize")
     .description(
-      "Hoist behaviour repeated in every project into defaults:, fold legacy agent/agentConfig into worker, drop registry-only keys",
+      "Hoist behaviour repeated in every project into defaults:, fold legacy agent/agentConfig into worker, " +
+        "reference identities by key and move shared agent settings into them, drop registry-only keys",
     )
     .option("--write", "Replace the config file (a timestamped .bak copy is kept)")
     .option("--out <file>", "Write the normalized YAML to this file instead of stdout")
     .option("--keep-legacy-agent", "Leave project-level agent/agentConfig in place")
     .option("--keep-git-identity-steps", "Leave git config user.* postCreate steps in place")
-    .action((opts: { write?: boolean; out?: string; keepLegacyAgent?: boolean; keepGitIdentitySteps?: boolean }) => {
+    .option("--keep-github-user", "Leave githubUser references and per-role agent settings in place")
+    .action((opts: { write?: boolean; out?: string; keepLegacyAgent?: boolean; keepGitIdentitySteps?: boolean; keepGithubUser?: boolean }) => {
       const path = findConfigFile();
       if (!path) {
         console.error(chalk.red("No config file found (set AO_CONFIG_PATH or run from a project)."));
@@ -166,6 +168,7 @@ export function registerConfig(program: Command): void {
       const { normalized, changes } = normalizeConfigDocument(raw, {
         foldLegacyAgent: !opts.keepLegacyAgent,
         dropGitIdentitySteps: !opts.keepGitIdentitySteps,
+        identityProfiles: !opts.keepGithubUser,
       });
       const diff = diffEffectiveProjects(raw, normalized);
       const yaml = stringifyYaml(normalized, { lineWidth: 0 });

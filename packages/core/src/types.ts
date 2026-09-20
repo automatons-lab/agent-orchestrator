@@ -1645,16 +1645,25 @@ export interface DefaultPlugins extends ProjectBehaviorDefaults {
 }
 
 /**
- * A GitHub identity AO can act as (fork). Keyed by login under
- * `identities:`; the token is read from the environment variable `tokenEnv`
- * and never stored in the config file.
+ * An identity AO can act as (fork): a GitHub user plus the agent that user
+ * runs. Keyed by a free id under `identities:`; the token is read from the
+ * environment variable `tokenEnv` and never stored in the config file. Roles
+ * reference an identity by key and inherit `githubUser`, `agent`, `model`,
+ * `reasoningEffort` and `permissions` unless they set their own.
  */
 export interface IdentityConfig {
   tokenEnv: string;
+  /** GitHub login; defaults to the identity key. */
+  githubUser?: string;
   /** Git author name; defaults to the login. */
   name?: string;
   /** Git author email; defaults to `<login>@users.noreply.github.com`. */
   email?: string;
+  /** Agent plugin (`codex`, `claude-code`, ...) for roles using this identity. */
+  agent?: string;
+  model?: string;
+  reasoningEffort?: string;
+  permissions?: AgentPermissionMode | LegacyAgentPermissionMode;
 }
 
 export type InstalledPluginSource = "registry" | "npm" | "local";
@@ -1680,7 +1689,9 @@ export interface InstalledPluginConfig {
 }
 
 export interface RoleAgentConfig {
-  /** GitHub login (key of `identities:`) this role acts as (fork). */
+  /** Key of `identities:` this role acts as (fork). Fills the fields below. */
+  identity?: string;
+  /** GitHub login of that identity (filled at validation; legacy reference form). */
   githubUser?: string;
   agent?: string;
   agentConfig?: AgentSpecificConfig;
@@ -1819,7 +1830,9 @@ export interface TrackerConfig {
 }
 
 export interface SCMConfig {
-  /** Identity (login from `identities:`) the engine itself uses for SCM API calls (fork). */
+  /** Identity (key of `identities:`) the engine itself uses for SCM API calls (fork). */
+  identity?: string;
+  /** GitHub login of that identity (filled at validation; legacy reference form). */
   githubUser?: string;
 
   /**

@@ -47,6 +47,8 @@ const execFileAsync = promisify(execFile);
 // ---------------------------------------------------------------------------
 
 export interface ResolvedReviewerConfig {
+  /** Key of `identities:` the review is posted as (falls back to the login). */
+  identity: string;
   githubUser: string;
   agent: string;
   model?: string;
@@ -91,6 +93,7 @@ export function resolveReviewerConfig(
   const agent = reviewer.agent ?? project.worker?.agent ?? project.agent ?? defaults.agent;
   const agentConfig = reviewer.agentConfig ?? {};
   return {
+    identity: reviewer.identity ?? reviewer.githubUser,
     githubUser: reviewer.githubUser,
     agent,
     ...(agentConfig.model ? { model: agentConfig.model } : {}),
@@ -921,10 +924,10 @@ export async function executeNativeReview(
     release();
     return fail(`SCM plugin "${project.scm?.plugin ?? "?"}" cannot submit reviews`);
   }
-  const token = getIdentityToken(deps.config, reviewer.githubUser, deps.env);
+  const token = getIdentityToken(deps.config, reviewer.identity, deps.env);
   if (!token) {
     release();
-    return fail(`no token for reviewer identity "${reviewer.githubUser}" in the environment`);
+    return fail(`no token for reviewer identity "${reviewer.identity}" in the environment`);
   }
   let posted: SubmittedReview;
   try {
