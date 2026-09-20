@@ -36,6 +36,7 @@ import {
   type Session,
   type CanonicalSessionLifecycle,
   type EventPriority,
+  type CIStatus,
   type ProjectConfig,
   type Tracker,
   type PREnrichmentData,
@@ -2448,6 +2449,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     reviewer: ResolvedReviewerConfig,
     headSha: string,
     scm: SCM,
+    ciStatus?: CIStatus,
   ): Promise<void> {
     if (session.metadata["lastNativeReviewSha"] === headSha) return;
     const projectId = session.projectId;
@@ -2521,6 +2523,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         store,
         scm,
         ...(tracker ? { tracker } : {}),
+        ...(ciStatus ? { ciStatus } : {}),
         runtime,
         agent,
       },
@@ -2603,7 +2606,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // Fork: spawn the AO-native review for this head (own SHA gate + concurrency).
     if (nativeReviewer && scm) {
-      await maybeDispatchNativeReview(session, project, nativeReviewer, headSha, scm).catch((err) => {
+      await maybeDispatchNativeReview(session, project, nativeReviewer, headSha, scm, cached.ciStatus).catch((err) => {
         console.error(
           `[native-review] dispatch failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`,
         );

@@ -165,6 +165,8 @@ describe("context, prompt and submission", () => {
     });
     expect(text).toContain("PR #7: Add login");
     expect(text).toContain("Review round: 2");
+    expect(text).toContain("Diff to review: `git diff origin/main...HEAD`");
+    expect(text).toContain("CI on this head, as reported to the orchestrator: unknown");
     expect(text).toContain("M\tsrc/auth.ts");
     expect(text).toContain("Add login");
     expect(text).toContain("trinity (yours) — changes_requested");
@@ -263,6 +265,7 @@ function makeHarness(opts: {
   const git = async (args: string[]): Promise<string> => {
     gitCalls.push(args);
     if (args[0] === "rev-parse") return "abcdef1234567890";
+    if (args[0] === "merge-base") return "0000111122223333";
     if (args[0] === "diff") return "M\tsrc/auth.ts";
     return "";
   };
@@ -339,6 +342,7 @@ function makeHarness(opts: {
     runtime,
     agent,
     env: opts.env ?? { TRI_TOKEN: "tok-tri", HOME: root, PATH: "/usr/bin" },
+    ciStatus: "passing",
     now: () => new Date(clock),
     sleep: async () => {
       clock += 30_000;
@@ -365,7 +369,12 @@ describe("executeNativeReview", () => {
       expect(result.run.tmuxName).toBe("app-rev-1");
       expect(h.gitCalls[0]).toEqual(["fetch", "--quiet", "origin", "main", "refs/pull/7/head"]);
       const dir = join(h.workspacePath, ".ao-review");
-      expect(readFileSync(join(dir, "context.md"), "utf-8")).toContain("no secrets in logs");
+      const context = readFileSync(join(dir, "context.md"), "utf-8");
+      expect(context).toContain("no secrets in logs");
+      expect(context).toContain("Merge base: 0000111122223333");
+      expect(context).toContain("Diff to review: `git diff 000011112222 HEAD`");
+      expect(context).toContain("CI on this head, as reported to the orchestrator: passing");
+      expect(h.gitCalls).toContainEqual(["merge-base", "origin/main", "HEAD"]);
       expect(readFileSync(join(dir, "prompt.md"), "utf-8")).toContain("Read .ao-review/context.md first");
       expect(JSON.parse(readFileSync(join(dir, "schema.json"), "utf-8")).required).toContain("verdict");
       expect(existsSync(join(dir, "review.json"))).toBe(true);
@@ -453,6 +462,18 @@ describe("executeNativeReview", () => {
       expect(r.run.status).toBe("failed");
       expect(r.run.terminationReason).toMatch(/exceeded 1 min timeout/);
       expect(h.destroyedRef()).toBe(1);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("falls back to the project default branch when the PR base branch is empty", async () => {
+    const h = makeHarness({ postMode: "dry-run" });
+    try {
+      const session = { ...h.deps.session, pr: { ...pr, baseBranch: "" } } as unknown as Session;
+      await executeNativeReview({ ...h.deps, session }, h.run);
+      expect(h.gitCalls[0]).toEqual(["fetch", "--quiet", "origin", "main", "refs/pull/7/head"]);
+      expect(h.gitCalls).toContainEqual(["merge-base", "origin/main", "HEAD"]);
     } finally {
       h.cleanup();
     }

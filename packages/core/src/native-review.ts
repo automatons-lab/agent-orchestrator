@@ -22,6 +22,7 @@ import { getIdentityToken } from "./identities.js";
 import { shellEscape } from "./utils.js";
 import type {
   Agent,
+  CIStatus,
   DefaultPlugins,
   OrchestratorConfig,
   PRInfo,
@@ -261,6 +262,10 @@ export interface ReviewContextInput {
   pr: PRInfo;
   headSha: string;
   baseRef: string;
+  /** Merge base of the PR against its base branch, when it could be computed. */
+  mergeBase?: string;
+  /** CI status of the head as the orchestrator knows it (statusCheckRollup). */
+  ciStatus?: string;
   round: number;
   issueText?: string;
   changedFiles: string[];
@@ -283,7 +288,16 @@ export function formatReviewContext(input: ReviewContextInput): string {
   lines.push(`- URL: ${input.pr.url}`);
   lines.push(`- Branch: ${input.pr.branch} → ${input.pr.baseBranch}`);
   lines.push(`- Head under review: ${input.headSha} (checked out as HEAD in this workspace)`);
-  lines.push(`- Base ref for diffs: ${input.baseRef}`);
+  lines.push(`- Base ref: ${input.baseRef}`);
+  if (input.mergeBase) {
+    lines.push(`- Merge base: ${input.mergeBase}`);
+    lines.push(`- Diff to review: \`git diff ${input.mergeBase.slice(0, 12)} HEAD\``);
+  } else {
+    lines.push(`- Diff to review: \`git diff ${input.baseRef}...HEAD\``);
+  }
+  lines.push(
+    `- CI on this head, as reported to the orchestrator: ${input.ciStatus ?? "unknown"} (you must not run tests or builds yourself; treat this as the test evidence)`,
+  );
   lines.push(`- Review round: ${input.round}`);
   lines.push("");
   lines.push(`## Changed files (${input.changedFiles.length})`);
@@ -336,7 +350,8 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
       : "",
     "",
     "## What to review",
-    "- Inspect the change with `git diff <base ref>...HEAD` (the base ref is in the context) and read surrounding code as needed.",
+    "- Inspect the change with the diff command given in the context (merge base → HEAD) and read surrounding code as needed.",
+    "- The context states the CI result for this head as the orchestrator knows it. That is the evidence for any criterion about tests or CI passing; you never run tests or builds yourself.",
     "- Verify every acceptance criterion of the linked issue against HEAD. Mark each `met`, `unmet` or `unclear` and cite the evidence (file, function, behaviour).",
     "- Look for real defects: wrong behaviour, missing error handling, security problems, broken contracts, regressions, tests that no longer prove what they claim. Prefer precision over volume; skip style nits unless a loaded skill requires them.",
     "- If earlier reviews requested changes, check whether each request was addressed; do not repeat resolved threads.",
@@ -511,6 +526,8 @@ export interface NativeReviewDeps {
   /** Called once the review finished; default keeps the pane 30 min then destroys it. */
   releasePane?: (handle: RuntimeHandle, runtime: Runtime) => void;
   keepPaneMs?: number;
+  /** CI status of the head from the lifecycle's PR enrichment, for the context file. */
+  ciStatus?: CIStatus;
 }
 
 export interface NativeReviewResult {
@@ -605,6 +622,9 @@ export async function executeNativeReview(
     throw new Error(`Agent "${deps.agent.name}" cannot run headless reviews (no getReviewCommand)`);
   }
   const round = reviewRoundFor(store, session.id);
+  // PRInfo restored from metadata may carry an empty base branch; the project's
+  // default branch is the right fallback for the diff base.
+  const baseBranch = pr.baseBranch && pr.baseBranch.trim().length > 0 ? pr.baseBranch : project.defaultBranch;
   const fail = (reason: string): NativeReviewResult => {
     const failed = store.updateRun(
       run.id,
@@ -639,7 +659,7 @@ export async function executeNativeReview(
   // 1. Workspace at the exact head SHA GitHub has.
   let workspacePath: string;
   try {
-    await git(["fetch", "--quiet", "origin", pr.baseBranch, `refs/pull/${pr.number}/head`], project.path);
+    await git(["fetch", "--quiet", "origin", baseBranch, `refs/pull/${pr.number}/head`], project.path);
     workspacePath = await prepareWorkspace({
       projectId,
       project,
@@ -656,10 +676,19 @@ export async function executeNativeReview(
   store.updateRun(run.id, { reviewerWorkspacePath: workspacePath }, now());
 
   // 2. Context the agent cannot fetch itself.
-  const baseRef = `origin/${pr.baseBranch}`;
+  const baseRef = `origin/${baseBranch}`;
+  let mergeBase: string | undefined;
+  try {
+    mergeBase = (await git(["merge-base", baseRef, "HEAD"], workspacePath)).trim() || undefined;
+  } catch {
+    mergeBase = undefined;
+  }
   let changedFiles: string[];
   try {
-    const out = await git(["diff", "--name-status", `${baseRef}...HEAD`], workspacePath);
+    const out = await git(
+      mergeBase ? ["diff", "--name-status", mergeBase, "HEAD"] : ["diff", "--name-status", `${baseRef}...HEAD`],
+      workspacePath,
+    );
     changedFiles = out.split("\n").filter((l) => l.trim().length > 0);
   } catch {
     changedFiles = [];
@@ -690,6 +719,8 @@ export async function executeNativeReview(
       pr,
       headSha,
       baseRef,
+      ...(mergeBase ? { mergeBase } : {}),
+      ...(deps.ciStatus ? { ciStatus: deps.ciStatus } : {}),
       round,
       ...(issueText ? { issueText } : {}),
       changedFiles,
