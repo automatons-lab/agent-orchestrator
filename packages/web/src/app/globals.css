@@ -9308,3 +9308,51 @@ body.is-resizing-x {
   cursor: col-resize;
   user-select: none;
 }
+
+/* Fork: review cards — shrinkable ids, verdict row typography, reviewer terminal. */
+.review-card .card__id {
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.review-card .session-card__header .session-card__control {
+  flex-shrink: 0;
+}
+
+.review-card__meta-text {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.review-detail-panel--with-terminal {
+  width: min(920px, calc(100vw - 18px));
+}
+
+.review-detail-panel__terminal {
+  display: flex;
+  flex-direction: column;
+  height: 42vh;
+  min-height: 320px;
+  margin: 0 16px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.review-detail-panel__terminal-title {
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-tertiary);
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.review-detail-panel__terminal-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}

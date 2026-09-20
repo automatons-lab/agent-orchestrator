@@ -25,6 +25,8 @@ export interface DashboardReviewRun extends CodeReviewRunSummary {
   workerHasRuntime: boolean;
   /** Worker session is merged, closed, killed or otherwise done (or no longer exists). */
   workerIsTerminal: boolean;
+  /** The reviewer's tmux pane (run.tmuxName) still exists, so a terminal can attach to it. */
+  reviewerTmuxAlive: boolean;
 }
 
 const REVIEW_ACTIVE_RUN_STATUSES = new Set<DashboardReviewRun["status"]>(["queued", "preparing", "running"]);

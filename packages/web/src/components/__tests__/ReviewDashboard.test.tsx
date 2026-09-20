@@ -3,6 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReviewDashboard } from "../ReviewDashboard";
 import type { DashboardReviewRun } from "@/lib/review-types";
 
+vi.mock("@/components/DirectTerminal", () => ({
+  DirectTerminal: ({ tmuxName }: { tmuxName?: string }) => (
+    <div data-testid="reviewer-terminal">{tmuxName}</div>
+  ),
+}));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
   usePathname: () => "/review",
@@ -38,6 +44,7 @@ function makeRun(overrides: Partial<DashboardReviewRun>): DashboardReviewRun {
     workerRuntimeState: "alive",
     workerHasRuntime: true,
     workerIsTerminal: false,
+    reviewerTmuxAlive: false,
     ...overrides,
   };
 }
@@ -260,6 +267,42 @@ describe("ReviewDashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show finished (1)" }));
     expect(screen.getByText("Merged work")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hide finished (1)" })).toBeInTheDocument();
+  });
+
+
+  it("offers a terminal button while the reviewer pane is alive and attaches to it in the details panel", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ findings: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ReviewDashboard
+        runs={[
+          makeRun({ status: "running", tmuxName: "app-rev-1", reviewerTmuxAlive: true }),
+          makeRun({
+            id: "review-run-2",
+            reviewerSessionId: "app-rev-2",
+            linkedSessionId: "app-2",
+            status: "clean",
+            workerTitle: "Released pane",
+            tmuxName: "app-rev-2",
+            reviewerTmuxAlive: false,
+          }),
+        ]}
+        projectId="my-app"
+        projectName="My App"
+        projects={[{ id: "my-app", name: "My App", path: "/tmp/my-app" }]}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: /^terminal$/i })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /^terminal$/i }));
+    expect(await screen.findByTestId("reviewer-terminal")).toHaveTextContent("app-rev-1");
+    expect(screen.getByRole("dialog")).toHaveClass("review-detail-panel--with-terminal");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
 });

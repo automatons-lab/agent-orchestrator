@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DirectTerminal } from "@/components/DirectTerminal";
 import type { CodeReviewFinding } from "@aoagents/ao-core";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import type { ProjectInfo } from "@/lib/project-name";
@@ -281,6 +282,8 @@ function ReviewDashboardInner({
         workerActivity: worker.activity,
         workerRuntimeState: worker.runtimeState,
         workerHasRuntime: worker.hasRuntime,
+        workerIsTerminal: false,
+        reviewerTmuxAlive: false,
       };
       setReviewRuns((current) => [
         nextRun,
@@ -936,6 +939,27 @@ function ReviewCard({
           </svg>
           details
         </button>
+        {run.reviewerTmuxAlive && run.tmuxName ? (
+          <button
+            type="button"
+            className="session-card__control session-card__terminal-link"
+            title={`Attach to the reviewer pane ${run.tmuxName}`}
+            onClick={() => onOpenDetails(run)}
+          >
+            <svg
+              className="session-card__control-icon"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <path d="M4 17l6-5-6-5" />
+              <path d="M12 19h8" />
+            </svg>
+            terminal
+          </button>
+        ) : null}
       </div>
 
       <div className="session-card__body flex min-h-0 flex-1 flex-col">
@@ -967,7 +991,7 @@ function ReviewCard({
                 <span className="card__meta-sep" aria-hidden="true">
                   ·
                 </span>
-                <span>round {run.round}</span>
+                <span className="review-card__meta-text">round {run.round}</span>
               </>
             ) : null}
             {run.agent || run.githubUser ? (
@@ -975,7 +999,9 @@ function ReviewCard({
                 <span className="card__meta-sep" aria-hidden="true">
                   ·
                 </span>
-                <span>{[run.agent, run.githubUser].filter(Boolean).join(" · ")}</span>
+                <span className="review-card__meta-text">
+                  {[run.agent, run.githubUser].filter(Boolean).join(" · ")}
+                </span>
               </>
             ) : null}
             {run.githubReviewUrl ? (
@@ -1103,12 +1129,13 @@ function ReviewDetailsDrawer({
   );
   const openFindings = findings.filter((finding) => finding.status === "open");
   const feedbackAvailable = canSendFeedbackToWorker(run);
+  const terminalAvailable = run.reviewerTmuxAlive && Boolean(run.tmuxName);
 
   return (
     <>
       <div className="review-detail-backdrop" onClick={onClose} />
       <aside
-        className="review-detail-panel"
+        className={`review-detail-panel${terminalAvailable ? " review-detail-panel--with-terminal" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="review-detail-title"
@@ -1153,6 +1180,23 @@ function ReviewDetailsDrawer({
             </button>
           ) : null}
         </div>
+
+        {terminalAvailable && run.tmuxName ? (
+          <section className="review-detail-panel__terminal" aria-label="Reviewer terminal">
+            <div className="review-detail-panel__terminal-title">
+              Reviewer terminal · {run.tmuxName}
+            </div>
+            <div className="review-detail-panel__terminal-body">
+              <DirectTerminal
+                sessionId={run.reviewerSessionId}
+                projectId={run.projectId}
+                tmuxName={run.tmuxName}
+                appearance="theme"
+                chromeless
+              />
+            </div>
+          </section>
+        ) : null}
 
         {!feedbackAvailable ? (
           <div className="review-detail-panel__notice">

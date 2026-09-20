@@ -6,6 +6,7 @@ import {
   isRestorable,
   isTerminalSession,
   markOutdatedCodeReviewRunsForSession,
+  type Runtime,
 } from "@aoagents/ao-core";
 import { getServices } from "@/lib/services";
 import {
@@ -55,6 +56,27 @@ export function resolveReviewProjectFilter(project?: string): string {
   return getPrimaryProjectId();
 }
 
+
+/** Probe reviewer panes only while they can plausibly exist (active, or released within this window). */
+const REVIEWER_PANE_PROBE_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+async function reviewerPaneAlive(
+  runtime: Runtime | null | undefined,
+  run: { tmuxName?: string; status: string; updatedAt: string },
+): Promise<boolean> {
+  if (!runtime || !run.tmuxName) return false;
+  const active = run.status === "queued" || run.status === "preparing" || run.status === "running";
+  const updatedAt = Date.parse(run.updatedAt);
+  if (!active && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > REVIEWER_PANE_PROBE_WINDOW_MS)) {
+    return false;
+  }
+  try {
+    return await runtime.isAlive({ id: run.tmuxName, runtimeName: runtime.name, data: {} });
+  } catch {
+    return false;
+  }
+}
+
 export async function getReviewPageData(project?: string): Promise<ReviewPageData> {
   const projectFilter = resolveReviewProjectFilter(project);
   const pageData: ReviewPageData = {
@@ -68,7 +90,7 @@ export async function getReviewPageData(project?: string): Promise<ReviewPageDat
   };
 
   try {
-    const { config, sessionManager } = await getServices();
+    const { config, sessionManager, registry } = await getServices();
     const projectIds =
       projectFilter === "all"
         ? Object.keys(config.projects)
@@ -146,8 +168,14 @@ export async function getReviewPageData(project?: string): Promise<ReviewPageDat
         await markOutdatedCodeReviewRunsForSession({ store, session: worker });
       }
 
+      const runtime = registry.get<Runtime>(
+        "runtime",
+        project.runtime ?? config.defaults.runtime ?? "tmux",
+      );
+      const summaries = store.listRunSummaries();
+      const paneAlive = await Promise.all(summaries.map((run) => reviewerPaneAlive(runtime, run)));
       runs.push(
-        ...store.listRunSummaries().map((run) => {
+        ...summaries.map((run, index) => {
           const worker = workerSessionsById.get(run.linkedSessionId);
           return {
             // Spreads every store field, including the AO-native review details
@@ -167,6 +195,7 @@ export async function getReviewPageData(project?: string): Promise<ReviewPageDat
             workerRuntimeState: worker?.lifecycle.runtime.state ?? null,
             workerHasRuntime: worker?.runtimeHandle !== null && worker?.runtimeHandle !== undefined,
             workerIsTerminal: worker ? isTerminalSession(worker) : true,
+            reviewerTmuxAlive: paneAlive[index] ?? false,
           };
         }),
       );
