@@ -128,6 +128,99 @@ function sanitizeCliArg(arg: string): string {
   return arg.replace(/^-+/, "");
 }
 
+// ---------------------------------------------------------------------------
+// Fork: config entity tools (`ao project|agent|identity add|update|rm`)
+// ---------------------------------------------------------------------------
+
+export type ConfigEntity = "project" | "agent" | "identity";
+export type ConfigEntityAction = "add" | "update" | "rm";
+
+/** camelCase tool parameter → CLI flag, per entity. Booleans/arrays are handled separately. */
+const CONFIG_ENTITY_FLAGS: Record<ConfigEntity, Record<string, string>> = {
+  project: {
+    name: "--name",
+    path: "--path",
+    repo: "--repo",
+    defaultBranch: "--default-branch",
+    sessionPrefix: "--session-prefix",
+    runtime: "--runtime",
+    workspace: "--workspace",
+    agentRules: "--agent-rules",
+    agentRulesFile: "--agent-rules-file",
+    branchNameTemplate: "--branch-name-template",
+    reviewers: "--reviewers",
+    workerIdentity: "--worker-identity",
+    workerAgent: "--worker-agent",
+    reviewerIdentity: "--reviewer-identity",
+    reviewerAgent: "--reviewer-agent",
+    reviewerRulesFile: "--reviewer-rules-file",
+    reviewerPostMode: "--reviewer-post-mode",
+    reviewerTimeoutMinutes: "--reviewer-timeout-minutes",
+    orchestratorIdentity: "--orchestrator-identity",
+    orchestratorAgent: "--orchestrator-agent",
+    scmIdentity: "--scm-identity",
+  },
+  agent: {
+    plugin: "--plugin",
+    model: "--model",
+    reasoningEffort: "--reasoning-effort",
+    permissions: "--permissions",
+    sandbox: "--sandbox",
+  },
+  identity: {
+    tokenEnv: "--token-env",
+    githubUser: "--github-user",
+    tokenSecret: "--token-secret",
+    agent: "--agent",
+    name: "--name",
+    email: "--email",
+  },
+};
+
+/**
+ * Build the `ao <entity> <action> <id> ...` argument list from tool params.
+ * Every value passes through sanitizeCliArg; `set` becomes `--set k=<JSON>`
+ * (JSON is valid YAML, so numbers, booleans, lists and quoted strings survive),
+ * `unset` becomes repeated `--unset`. Always asks for `--json`.
+ */
+export function buildConfigEntityArgs(
+  entity: ConfigEntity,
+  action: ConfigEntityAction,
+  params: Record<string, unknown>,
+): string[] {
+  const id = params["id"];
+  if (typeof id !== "string" || id.trim().length === 0) throw new Error("id is required");
+  const args = [entity, action, sanitizeCliArg(id.trim())];
+  for (const [key, flag] of Object.entries(CONFIG_ENTITY_FLAGS[entity])) {
+    const value = params[key];
+    if (value === undefined || value === null || value === "") continue;
+    args.push(flag, sanitizeCliArg(String(value)));
+  }
+  if (entity === "project") {
+    if (params["reviewerEnabled"] === true) args.push("--reviewer-enabled");
+    if (params["reviewerEnabled"] === false) args.push("--no-reviewer-enabled");
+    const postCreate = params["postCreate"];
+    if (Array.isArray(postCreate)) {
+      for (const step of postCreate) args.push("--post-create", sanitizeCliArg(String(step)));
+    }
+    if (action === "add" && params["clone"] === true) args.push("--clone");
+  }
+  const set = params["set"];
+  if (set && typeof set === "object" && !Array.isArray(set)) {
+    for (const [key, value] of Object.entries(set as Record<string, unknown>)) {
+      args.push("--set", sanitizeCliArg(`${key}=${JSON.stringify(value)}`));
+    }
+  }
+  const unset = params["unset"];
+  if (action === "update" && Array.isArray(unset)) {
+    for (const key of unset) args.push("--unset", sanitizeCliArg(String(key)));
+  }
+  if (action === "rm" && params["force"] === true) args.push("--force");
+  if (params["dryRun"] === true) args.push("--dry-run");
+  args.push("--json");
+  return args;
+}
+
 function tryRunAo(config: PluginConfig, args: string[], timeoutMs?: number) {
   // AO requires cwd to be the repo root where agent-orchestrator.yaml lives
   const cwd = config.aoCwd || process.cwd();
@@ -1455,6 +1548,289 @@ export default function (api: PluginApi) {
         };
       }
       return { content: [{ type: "text", text: result.output }] };
+    },
+  });
+
+  // =========================================================================
+  // Fork: config entity tools — edit the live AO config file through the CLI
+  // =========================================================================
+
+  const CONFIG_EDIT_NOTE =
+    "Writes the AO config file after validation (a timestamped backup is kept). " +
+    "The engine reads config at startup: after a real (non-dryRun) change tell the operator to restart " +
+    "ao-engine at 0 active sessions. Use dryRun:true to preview.";
+  const SET_PARAM = {
+    type: "object",
+    description: "Any other keys under the entity, dotted (e.g. {\"reviewer.timeoutMinutes\": 30}); values are written as YAML",
+    additionalProperties: true,
+  };
+  const UNSET_PARAM = { type: "array", items: { type: "string" }, description: "Dotted keys to remove" };
+  const DRY_RUN_PARAM = { type: "boolean", description: "Validate and show the result without writing" };
+  const projectBehaviourParams = {
+    runtime: { type: "string", description: "Override defaults.runtime (tmux, process)" },
+    workspace: { type: "string", description: "Override defaults.workspace (clone, worktree)" },
+    agentRulesFile: { type: "string", description: "Worker rules file (override)" },
+    branchNameTemplate: { type: "string", description: "Override defaults.branchNameTemplate" },
+    reviewers: { type: "string", description: "Comma-separated reviewer logins (override)" },
+    postCreate: { type: "array", items: { type: "string" }, description: "postCreate steps (replaces the list)" },
+    workerIdentity: { type: "string", description: "identities key the worker acts as" },
+    workerAgent: { type: "string", description: "agents key (or plugin) the worker runs, e.g. claude-coder" },
+    reviewerIdentity: { type: "string", description: "identities key the reviewer acts as" },
+    reviewerAgent: { type: "string", description: "agents key (or plugin) the reviewer runs, e.g. claude-reviewer" },
+    reviewerEnabled: { type: "boolean", description: "Enable/disable the AO-native reviewer for this project" },
+    reviewerRulesFile: { type: "string", description: "Reviewer-only rules file" },
+    reviewerPostMode: { type: "string", description: "live | dry-run" },
+    reviewerTimeoutMinutes: { type: "number", description: "Reviewer run timeout" },
+    orchestratorIdentity: { type: "string", description: "identities key the orchestrator acts as" },
+    orchestratorAgent: { type: "string", description: "agents key (or plugin) the orchestrator runs" },
+    scmIdentity: { type: "string", description: "identities key for the project's SCM calls" },
+    set: SET_PARAM,
+    dryRun: DRY_RUN_PARAM,
+  };
+
+  async function runConfigEntity(entity: ConfigEntity, action: ConfigEntityAction, params: Record<string, unknown>) {
+    let args: string[];
+    try {
+      args = buildConfigEntityArgs(entity, action, params);
+    } catch (err) {
+      return { content: [{ type: "text", text: `Invalid parameters: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+    const result = await tryRunAo(config, args, 60_000);
+    if (!result.ok) {
+      return { content: [{ type: "text", text: `ao ${entity} ${action} failed: ${result.error}` }], isError: true };
+    }
+    const suffix = params["dryRun"] === true ? "" : "\n\nRestart ao-engine at 0 active sessions to apply (config is read at startup).";
+    return { content: [{ type: "text", text: result.output + suffix }] };
+  }
+
+  api.registerTool({
+    name: "ao_project_add",
+    description:
+      "Add a project to the AO config. Required: id and repo (owner/name). path defaults to " +
+      "~/.agent-orchestrator/repos/<id>, defaultBranch to main, sessionPrefix and name to the id. " +
+      "Behaviour (runtime, agents, identities, reviewer) is inherited from defaults: — pass overrides only when needed. " +
+      "clone:true creates the stub clone AO uses as the project path. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id", "repo"],
+      properties: {
+        id: { type: "string", description: "Project id (config key, e.g. my-service)" },
+        repo: { type: "string", description: "GitHub repository owner/name" },
+        name: { type: "string", description: "Display name" },
+        path: { type: "string", description: "Stub clone path used by AO" },
+        defaultBranch: { type: "string", description: "Default branch (default main)" },
+        sessionPrefix: { type: "string", description: "Session name prefix (default: the id)" },
+        clone: { type: "boolean", description: "Create the stub clone from git@github.com:<repo>.git when the path is missing" },
+        ...projectBehaviourParams,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("project", "add", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_project_update",
+    description:
+      "Change fields of a project in the AO config (registry fields, behaviour overrides, role identity/agent, reviewer settings; " +
+      "set for any other dotted key, unset to remove keys). " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "Project id" },
+        repo: { type: "string", description: "GitHub repository owner/name" },
+        name: { type: "string", description: "Display name" },
+        path: { type: "string", description: "Stub clone path used by AO" },
+        defaultBranch: { type: "string", description: "Default branch" },
+        sessionPrefix: { type: "string", description: "Session name prefix" },
+        ...projectBehaviourParams,
+        unset: UNSET_PARAM,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("project", "update", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_project_remove",
+    description: "Remove a project from the AO config (its clone and session data stay on disk). Confirm with the user first. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: { id: { type: "string", description: "Project id" }, dryRun: DRY_RUN_PARAM },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("project", "rm", params);
+    },
+  });
+
+  const agentParams = {
+    model: { type: "string", description: "Model passed to the agent CLI (e.g. gpt-6-astra, claude-opus-5)" },
+    reasoningEffort: { type: "string", description: "codex model_reasoning_effort / claude --effort: low, medium, high, xhigh" },
+    permissions: { type: "string", description: "permissionless | auto-edit | suggest | default" },
+    sandbox: { type: "string", description: "codex exec sandbox for headless reviews (e.g. danger-full-access)" },
+    set: SET_PARAM,
+    dryRun: DRY_RUN_PARAM,
+  };
+
+  api.registerTool({
+    name: "ao_agent_add",
+    description:
+      "Add an agents: profile (plugin + model + effort + permissions) to the AO config, e.g. claude-coder / codex-reviewer. " +
+      "Identities and role blocks reference profiles by id. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id", "plugin"],
+      properties: {
+        id: { type: "string", description: "Profile id, e.g. claude-coder" },
+        plugin: { type: "string", description: "Agent plugin: codex, claude-code, ..." },
+        ...agentParams,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("agent", "add", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_agent_update",
+    description: "Change fields of an agents: profile in the AO config (model, effort, permissions, sandbox, set/unset). " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "Profile id" },
+        plugin: { type: "string", description: "Agent plugin" },
+        ...agentParams,
+        unset: UNSET_PARAM,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("agent", "update", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_agent_remove",
+    description: "Remove an agents: profile. Refused while an identity or role references it unless force:true. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "Profile id" },
+        force: { type: "boolean", description: "Remove even when referenced" },
+        dryRun: DRY_RUN_PARAM,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("agent", "rm", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_agent_list",
+    description: "List agents: profiles in the AO config (plugin, model, effort, permissions) and which identities use them.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const result = await tryRunAo(config, ["agent", "ls", "--json"]);
+      return result.ok
+        ? { content: [{ type: "text", text: result.output }] }
+        : { content: [{ type: "text", text: `ao agent ls failed: ${result.error}` }], isError: true };
+    },
+  });
+
+  const identityParams = {
+    githubUser: { type: "string", description: "GitHub login (default: the id)" },
+    tokenSecret: { type: "string", description: "Google Secret Manager secret projects/<p>/secrets/<name>[/versions/<v>] that fills tokenEnv" },
+    agent: { type: "string", description: "agents key (or plugin) roles with this identity run" },
+    name: { type: "string", description: "Git author name (default: the login)" },
+    email: { type: "string", description: "Git author email (default: <login>@users.noreply.github.com)" },
+    set: SET_PARAM,
+    dryRun: DRY_RUN_PARAM,
+  };
+
+  api.registerTool({
+    name: "ao_identity_add",
+    description:
+      "Add an identities: entry (a GitHub user AO acts as) to the AO config. Required: id and tokenEnv (the env var carrying the token); " +
+      "tokenSecret lets the CLI fill it from Google Secret Manager. Never pass token values. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id", "tokenEnv"],
+      properties: {
+        id: { type: "string", description: "Identity id, e.g. neo" },
+        tokenEnv: { type: "string", description: "Environment variable that carries the GitHub token" },
+        ...identityParams,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("identity", "add", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_identity_update",
+    description: "Change fields of an identities: entry (login, tokenEnv, tokenSecret, agent profile, git author; set/unset). " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "Identity id" },
+        tokenEnv: { type: "string", description: "Environment variable that carries the GitHub token" },
+        ...identityParams,
+        unset: UNSET_PARAM,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("identity", "update", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_identity_remove",
+    description: "Remove an identities: entry. Refused while a role or scm block uses it unless force:true. " + CONFIG_EDIT_NOTE,
+    parameters: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "Identity id" },
+        force: { type: "boolean", description: "Remove even when used" },
+        dryRun: DRY_RUN_PARAM,
+      },
+    },
+    async execute(_toolCallId: string, params: Record<string, unknown>) {
+      return runConfigEntity("identity", "rm", params);
+    },
+  });
+
+  api.registerTool({
+    name: "ao_identity_list",
+    description: "List identities: entries in the AO config (login, token env/secret name, agent profile, where used). Token values are never shown; ao_doctor verifies them.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const result = await tryRunAo(config, ["identity", "ls", "--json"]);
+      return result.ok
+        ? { content: [{ type: "text", text: result.output }] }
+        : { content: [{ type: "text", text: `ao identity ls failed: ${result.error}` }], isError: true };
+    },
+  });
+
+  api.registerTool({
+    name: "ao_config_show",
+    description: "Show the effective AO config after defaults inheritance: agents, identities and (with project) one project's resolved block (identity, agent profile, agentConfig, reviewer settings).",
+    parameters: {
+      type: "object",
+      properties: { project: { type: "string", description: "Project id; omit for the whole effective config" } },
+    },
+    async execute(_toolCallId: string, params: { project?: string }) {
+      const args = ["config", "show", "--json"];
+      if (params.project) args.push("-p", sanitizeCliArg(params.project));
+      const result = await tryRunAo(config, args);
+      return result.ok
+        ? { content: [{ type: "text", text: result.output }] }
+        : { content: [{ type: "text", text: `ao config show failed: ${result.error}` }], isError: true };
     },
   });
 

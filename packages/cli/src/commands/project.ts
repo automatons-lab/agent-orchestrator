@@ -1,24 +1,18 @@
-import { basename, resolve } from "node:path";
-import { existsSync } from "node:fs";
 import chalk from "chalk";
 import type { Command } from "commander";
 import {
   getPortfolio,
   getPortfolioSessionCounts,
   isPortfolioEnabled,
-  recordActivityEvent,
-  registerProject,
-  unregisterProject,
   loadPreferences,
   savePreferences,
-  loadLocalProjectConfig,
-  loadConfig,
 } from "@aoagents/ao-core";
 import {
   formatPortfolioDegradedReason,
   formatPortfolioProjectName,
   formatPortfolioProjectStatus,
 } from "../lib/portfolio-display.js";
+import { registerProjectConfigCommands } from "./project-config.js";
 
 function assertPortfolioEnabled(): void {
   if (isPortfolioEnabled()) return;
@@ -44,7 +38,7 @@ export function registerProjectCommand(program: Command): void {
       if (portfolio.length === 0) {
         console.log(chalk.dim("No projects in portfolio."));
         console.log(
-          chalk.dim("Run `ao start` in a project or `ao project add <path>` to register one."),
+          chalk.dim("Run `ao project add <id> --repo <owner/name>` to register one."),
         );
         return;
       }
@@ -74,103 +68,8 @@ export function registerProjectCommand(program: Command): void {
       console.log();
     });
 
-  // ao project add <path>
-  project
-    .command("add <path>")
-    .description("Register a project path in the portfolio")
-    .option(
-      "-k, --key <key>",
-      "Legacy only: the project key under `projects:` in a wrapped agent-orchestrator.yaml. Omit for flat configs.",
-    )
-    .option("--default", "Use the default project ID, adding a numeric suffix if needed")
-    .action(async (path: string, opts: { key?: string; default?: boolean }) => {
-      assertPortfolioEnabled();
-      const resolvedPath = resolve(path);
-      const candidatePaths = [
-        resolve(resolvedPath, "agent-orchestrator.yaml"),
-        resolve(resolvedPath, "agent-orchestrator.yml"),
-      ];
-
-      if (!loadLocalProjectConfig(resolvedPath)) {
-        const existingConfigPath = candidatePaths.find((candidate) => existsSync(candidate));
-
-        if (!existingConfigPath) {
-          recordActivityEvent({
-            source: "cli",
-            kind: "cli.project_register_failed",
-            level: "warn",
-            summary: `ao project add: no agent-orchestrator config found`,
-            data: { resolvedPath, reason: "no_config_found" },
-          });
-          console.error(chalk.red(`No agent-orchestrator.yaml found at ${resolvedPath}`));
-          process.exit(1);
-        }
-
-        try {
-          loadConfig(existingConfigPath);
-          recordActivityEvent({
-            source: "cli",
-            kind: "cli.project_register_failed",
-            level: "warn",
-            summary: `ao project add: found old-format config requiring migration`,
-            data: {
-              resolvedPath,
-              configPath: existingConfigPath,
-              reason: "old_format",
-            },
-          });
-          console.error(
-            chalk.red(
-              `Found old-format config at ${existingConfigPath}. Run \`ao start\` in that project to migrate it before using \`ao project add\`.`,
-            ),
-          );
-        } catch (error) {
-          recordActivityEvent({
-            source: "cli",
-            kind: "cli.project_register_failed",
-            level: "error",
-            summary: `ao project add: config load failed`,
-            data: {
-              resolvedPath,
-              configPath: existingConfigPath,
-              reason: "load_error",
-              errorMessage: error instanceof Error ? error.message : String(error),
-            },
-          });
-          console.error(
-            chalk.red(
-              `Found agent-orchestrator config at ${existingConfigPath}, but it could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          );
-        }
-        process.exit(1);
-      }
-
-      let projectId = opts.key;
-      if (!projectId) {
-        projectId = basename(resolvedPath) || "project";
-      }
-
-      const effectiveId = registerProject(resolvedPath, projectId, basename(resolvedPath) || projectId);
-      console.log(chalk.green(`Registered project "${effectiveId}" at ${resolvedPath}`));
-    });
-
-  // ao project rm <id>
-  project
-    .command("rm <id>")
-    .description("Remove a project from the portfolio")
-    .action((id: string) => {
-      assertPortfolioEnabled();
-      const portfolio = getPortfolio();
-      const found = portfolio.find((p) => p.id === id);
-      if (!found) {
-        console.error(chalk.red(`Project "${id}" not found in portfolio`));
-        process.exit(1);
-      }
-
-      unregisterProject(id);
-      console.log(chalk.green(`Removed project "${id}" from portfolio`));
-    });
+  // Fork: add/update/rm edit the config file directly (see project-config.ts).
+  registerProjectConfigCommands(project);
 
   // ao project set-default <id>
   project

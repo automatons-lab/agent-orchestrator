@@ -2,11 +2,13 @@
   "id": "agent-orchestrator",
   "name": "Agent Orchestrator",
   "description": "Control and monitor Agent Orchestrator (AO) from OpenClaw. Slash commands, AI tools, issue board scanning, proactive planning, and health monitoring.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["aoCwd"],
+    "required": [
+      "aoCwd"
+    ],
     "properties": {
       "aoPath": {
         "type": "string",
@@ -34,7 +36,7 @@
     "aoCwd": {
       "label": "AO working directory",
       "placeholder": "/home/user/my-project",
-      "help": "Path to the directory containing agent-orchestrator.yaml. Required — most commands fail without this."
+      "help": "Path to the directory containing agent-orchestrator.yaml. Required \u2014 most commands fail without this."
     },
     "aoPath": {
       "label": "AO CLI path",
@@ -72,7 +74,19 @@
       "ao_session_restore",
       "ao_session_claim_pr",
       "ao_session_list",
-      "ao_status"
+      "ao_status",
+      "ao_project_add",
+      "ao_project_update",
+      "ao_project_remove",
+      "ao_agent_add",
+      "ao_agent_update",
+      "ao_agent_remove",
+      "ao_agent_list",
+      "ao_identity_add",
+      "ao_identity_update",
+      "ao_identity_remove",
+      "ao_identity_list",
+      "ao_config_show"
     ]
   }
 }

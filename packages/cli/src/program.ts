@@ -20,6 +20,7 @@ import { registerMigrateStorage } from "./commands/migrate-storage.js";
 import { registerCompletion } from "./commands/completion.js";
 import { registerEvents } from "./commands/events.js";
 import { registerConfig } from "./commands/config.js";
+import { registerAgentCommand, registerIdentityCommand } from "./commands/config-entities.js";
 import { getConfigInstruction } from "./lib/config-instruction.js";
 import { registerIdentitySecretsHook } from "./lib/identity-secrets.js";
 import { getCliVersion } from "./options/version.js";
@@ -56,6 +57,8 @@ export function createProgram(): Command {
   registerCompletion(program);
   registerEvents(program);
   registerConfig(program);
+  registerAgentCommand(program);
+  registerIdentityCommand(program);
 
   program
     .command("config-help")

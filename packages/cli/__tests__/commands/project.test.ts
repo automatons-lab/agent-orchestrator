@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Command } from "commander";
 
 const {
@@ -19,7 +19,9 @@ const {
   mockLoadLocalProjectConfig: vi.fn(),
 }));
 
-vi.mock("@aoagents/ao-core", () => ({
+// Fork: keep the real config loader so `ao project add|update|rm` validate against a temp file.
+vi.mock("@aoagents/ao-core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@aoagents/ao-core")>()),
   isPortfolioEnabled: () => true,
   getPortfolio: mockGetPortfolio,
   getPortfolioSessionCounts: mockGetPortfolioSessionCounts,
@@ -29,7 +31,6 @@ vi.mock("@aoagents/ao-core", () => ({
   loadPreferences: mockLoadPreferences,
   savePreferences: mockSavePreferences,
   loadLocalProjectConfig: mockLoadLocalProjectConfig,
-  loadConfig: vi.fn(),
 }));
 
 vi.mock("../../src/lib/portfolio-display.js", () => ({
@@ -43,6 +44,10 @@ vi.mock("../../src/lib/prompts.js", () => ({
 }));
 
 import { registerProjectCommand } from "../../src/commands/project.js";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FIXTURE } from "../fixtures/config-edit-fixture.js";
 
 let program: Command;
 let logSpy: ReturnType<typeof vi.spyOn>;
@@ -100,106 +105,6 @@ describe("ao project ls", () => {
   });
 });
 
-describe("ao project add", () => {
-  it("registers a valid project path", async () => {
-    mockLoadLocalProjectConfig.mockReturnValue({ projects: {} });
-
-    await program.parseAsync(["node", "ao", "project", "add", "/tmp/my-project"]);
-
-    expect(mockRegisterProject).toHaveBeenCalledWith(
-      expect.stringContaining("my-project"),
-      "my-project",
-      "my-project",
-    );
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Registered"));
-  });
-
-  it("exits with error when no config found at path", async () => {
-    mockLoadLocalProjectConfig.mockReturnValue(null);
-
-    await expect(
-      program.parseAsync(["node", "ao", "project", "add", "/tmp/no-config"]),
-    ).rejects.toThrow();
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("No agent-orchestrator.yaml"));
-  });
-
-  it("passes --key option to registerProject", async () => {
-    mockLoadLocalProjectConfig.mockReturnValue({ projects: {} });
-
-    await program.parseAsync([
-      "node",
-      "ao",
-      "project",
-      "add",
-      "/tmp/my-project",
-      "-k",
-      "custom-key",
-    ]);
-
-    expect(mockRegisterProject).toHaveBeenCalledWith(
-      expect.stringContaining("my-project"),
-      "custom-key",
-      "my-project",
-    );
-  });
-
-  it("passes the basename when --default is provided", async () => {
-    mockLoadLocalProjectConfig.mockReturnValue({ projects: {} });
-
-    await program.parseAsync([
-      "node",
-      "ao",
-      "project",
-      "add",
-      "/tmp/agent-orchestrator",
-      "--default",
-    ]);
-
-    expect(mockRegisterProject).toHaveBeenCalledWith(
-      expect.stringContaining("agent-orchestrator"),
-      "agent-orchestrator",
-      "agent-orchestrator",
-    );
-  });
-
-  it("surfaces duplicate path collisions as errors", async () => {
-    mockLoadLocalProjectConfig.mockReturnValue({ projects: {} });
-    mockRegisterProject.mockImplementationOnce(() => {
-      throw new Error(
-        'Project "existing-proj" is already registered at "/tmp/my-project". Choose a different project ID or path.',
-      );
-    });
-
-    await expect(
-      program.parseAsync(["node", "ao", "project", "add", "/tmp/my-project"]),
-    ).rejects.toThrow();
-
-    expect(mockRegisterProject).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("ao project rm", () => {
-  it("removes an existing project", async () => {
-    mockGetPortfolio.mockReturnValue([{ id: "app-1", name: "App One", source: "/tmp/app-1" }]);
-
-    await program.parseAsync(["node", "ao", "project", "rm", "app-1"]);
-
-    expect(mockUnregisterProject).toHaveBeenCalledWith("app-1");
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Removed"));
-  });
-
-  it("exits with error when project not found", async () => {
-    mockGetPortfolio.mockReturnValue([]);
-
-    await expect(
-      program.parseAsync(["node", "ao", "project", "rm", "nonexistent"]),
-    ).rejects.toThrow();
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("not found"));
-  });
-});
-
 describe("ao project set-default", () => {
   it("sets default project", async () => {
     mockGetPortfolio.mockReturnValue([{ id: "app-1", name: "App One", source: "/tmp/app-1" }]);
@@ -219,5 +124,55 @@ describe("ao project set-default", () => {
     ).rejects.toThrow();
 
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("not found"));
+  });
+});
+
+// Fork: file-backed add/update/rm (see project-config.ts).
+describe("ao project add/update/rm (config file)", () => {
+  let dir: string;
+  let file: string;
+  const previousPath = process.env["AO_CONFIG_PATH"];
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ao-project-cmd-"));
+    file = join(dir, "config-multi-projects.yaml");
+    writeFileSync(file, FIXTURE, "utf-8");
+    process.env["AO_CONFIG_PATH"] = file;
+  });
+  afterEach(() => {
+    if (previousPath === undefined) delete process.env["AO_CONFIG_PATH"];
+    else process.env["AO_CONFIG_PATH"] = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const lastJson = (): Record<string, unknown> => {
+    const calls = logSpy.mock.calls.map((c) => String(c[0]));
+    return JSON.parse(calls[calls.length - 1]!) as Record<string, unknown>;
+  };
+
+  it("add --dry-run validates and prints JSON without writing", async () => {
+    await program.parseAsync(["node", "ao", "project", "add", "web", "--repo", "org/web", "--worker-agent", "codex-reviewer", "--dry-run", "--json"]);
+    const out = lastJson();
+    expect(out["ok"]).toBe(true);
+    expect(out["dryRun"]).toBe(true);
+    expect(out["changes"]).toContain('projects.web.repo = "org/web"');
+    expect((out["effective"] as Record<string, unknown>)["worker"]).toMatchObject({ identity: "neo", agentProfile: "codex-reviewer" });
+    expect(readFileSync(file, "utf-8")).toBe(FIXTURE);
+  });
+
+  it("add, update and rm write the file with a backup", async () => {
+    await program.parseAsync(["node", "ao", "project", "add", "web", "--repo", "org/web", "--path", "/repos/web"]);
+    expect(readFileSync(file, "utf-8")).toContain("  web:\n    name: web\n    path: /repos/web\n    repo: org/web\n");
+    await program.parseAsync(["node", "ao", "project", "update", "web", "--reviewer-enabled", "--set", "reviewer.timeoutMinutes=40"]);
+    expect(readFileSync(file, "utf-8")).toContain("    reviewer:\n      enabled: true\n      timeoutMinutes: 40\n");
+    await program.parseAsync(["node", "ao", "project", "rm", "web"]);
+    expect(readFileSync(file, "utf-8")).not.toContain("web:");
+    expect(readdirSync(dir).filter((f) => f.includes(".bak-"))).toHaveLength(3);
+  });
+
+  it("refuses an unknown project and an invalid reference, leaving the file untouched", async () => {
+    await expect(program.parseAsync(["node", "ao", "project", "rm", "nope"])).rejects.toThrow("EXIT:1");
+    expect(errorSpy.mock.calls.some((c) => String(c[0]).includes('unknown project "nope"'))).toBe(true);
+    await expect(program.parseAsync(["node", "ao", "project", "update", "app", "--worker-identity", "ghost"])).rejects.toThrow("EXIT:1");
+    expect(errorSpy.mock.calls.some((c) => String(c[0]).includes('unknown identity "ghost"'))).toBe(true);
+    expect(readFileSync(file, "utf-8")).toBe(FIXTURE);
   });
 });

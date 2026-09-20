@@ -122,3 +122,50 @@ test("allowlist helpers preserve existing entries while adding AO requirements",
   ]);
   assert.deepEqual(parseStringArraySetting("null"), []);
 });
+
+test("buildConfigEntityArgs maps tool params to ao CLI flags and always asks for JSON", async () => {
+  const { buildConfigEntityArgs } = await import("./index.ts");
+  assert.deepEqual(
+    buildConfigEntityArgs("project", "add", {
+      id: "my-service",
+      repo: "org/my-service",
+      workerAgent: "claude-coder",
+      reviewerEnabled: true,
+      postCreate: ["npm ci", "--rm -rf /"],
+      clone: true,
+      set: { "reviewer.timeoutMinutes": 30, reviewers: ["a", "b"], "reviewer.postMode": "dry-run" },
+      dryRun: true,
+    }),
+    [
+      "project", "add", "my-service",
+      "--repo", "org/my-service",
+      "--worker-agent", "claude-coder",
+      "--reviewer-enabled",
+      "--post-create", "npm ci",
+      "--post-create", "rm -rf /",
+      "--clone",
+      "--set", 'reviewer.timeoutMinutes=30',
+      "--set", 'reviewers=["a","b"]',
+      "--set", 'reviewer.postMode="dry-run"',
+      "--dry-run",
+      "--json",
+    ],
+  );
+  assert.deepEqual(
+    buildConfigEntityArgs("project", "update", { id: "app", reviewerEnabled: false, unset: ["name", "--path"], clone: true }),
+    ["project", "update", "app", "--no-reviewer-enabled", "--unset", "name", "--unset", "path", "--json"],
+  );
+  assert.deepEqual(
+    buildConfigEntityArgs("agent", "add", { id: "claude-coder", plugin: "claude-code", model: "claude-opus-5", reasoningEffort: "high", permissions: "permissionless" }),
+    ["agent", "add", "claude-coder", "--plugin", "claude-code", "--model", "claude-opus-5", "--reasoning-effort", "high", "--permissions", "permissionless", "--json"],
+  );
+  assert.deepEqual(
+    buildConfigEntityArgs("identity", "rm", { id: "--neo", force: true }),
+    ["identity", "rm", "neo", "--force", "--json"],
+  );
+  assert.deepEqual(
+    buildConfigEntityArgs("identity", "add", { id: "neo", tokenEnv: "NEO_GITHUB_TOKEN", tokenSecret: "projects/1/secrets/github-token-neo", agent: "codex-coder", email: "" }),
+    ["identity", "add", "neo", "--token-env", "NEO_GITHUB_TOKEN", "--token-secret", "projects/1/secrets/github-token-neo", "--agent", "codex-coder", "--json"],
+  );
+  assert.throws(() => buildConfigEntityArgs("project", "rm", {}), /id is required/);
+});
