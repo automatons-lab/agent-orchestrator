@@ -3637,6 +3637,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       environment: {
         ...environment,
         ...(opencodeConfigPath ? { OPENCODE_CONFIG: opencodeConfigPath } : {}),
+        // Fork: restored workers get the same identity environment as spawned ones.
+        ...roleIdentityEnvironment(config, project, "worker"),
         ...(project.env ?? {}),
         PATH: buildAgentPath(environment["PATH"] ?? process.env["PATH"]),
         GH_PATH: PREFERRED_GH_PATH,
