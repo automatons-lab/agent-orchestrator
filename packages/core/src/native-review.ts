@@ -156,7 +156,10 @@ export const REVIEW_OUTPUT_JSON_SCHEMA = {
           filePath: { type: ["string", "null"] },
           startLine: { type: ["integer", "null"] },
           endLine: { type: ["integer", "null"] },
-          confidence: { type: ["number", "null"] },
+          confidence: {
+            type: ["number", "null"],
+            description: "Fraction between 0 and 1 (0.9 means 90% sure), not a percentage.",
+          },
           blocking: { type: "boolean" },
         },
       },
@@ -166,6 +169,16 @@ export const REVIEW_OUTPUT_JSON_SCHEMA = {
 
 const nullableString = z.string().nullable().optional();
 const nullableInt = z.number().int().positive().nullable().optional();
+
+/**
+ * Confidence is decorative, so it never fails a review: percentages (100, 85)
+ * are folded into the 0..1 range and anything else out of range is dropped.
+ */
+function normalizeConfidence(value: unknown): unknown {
+  if (typeof value !== "number" || !Number.isFinite(value)) return value;
+  const fraction = value > 1 && value <= 100 ? value / 100 : value;
+  return fraction < 0 || fraction > 1 ? null : fraction;
+}
 
 export const ReviewOutputSchema = z.object({
   verdict: z.enum(["approve", "request_changes", "comment"]),
@@ -188,7 +201,7 @@ export const ReviewOutputSchema = z.object({
         filePath: nullableString,
         startLine: nullableInt,
         endLine: nullableInt,
-        confidence: z.number().min(0).max(1).nullable().optional(),
+        confidence: z.preprocess(normalizeConfidence, z.number().min(0).max(1).nullable().optional()),
         blocking: z.boolean().default(false),
       }),
     )

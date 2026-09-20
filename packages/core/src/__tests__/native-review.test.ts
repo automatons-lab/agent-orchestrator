@@ -131,6 +131,20 @@ describe("reviewerCouldNotRun", () => {
 });
 
 describe("parseReviewOutput", () => {
+  it("folds percentage confidences into the 0..1 range and drops out-of-range values instead of failing", () => {
+    const withPercent = {
+      ...sampleOutput,
+      findings: sampleOutput.findings.map((f, i) => ({ ...f, confidence: i === 0 ? 100 : 85 })),
+    };
+    const parsed = parseReviewOutput(JSON.stringify(withPercent));
+    expect(parsed.findings[0]?.confidence).toBe(1);
+    expect(parsed.findings[1]?.confidence).toBeCloseTo(0.85);
+    const garbage = { ...sampleOutput, findings: [{ ...sampleOutput.findings[0], confidence: 250 }] };
+    expect(parseReviewOutput(JSON.stringify(garbage)).findings[0]?.confidence).toBeNull();
+    const fraction = { ...sampleOutput, findings: [{ ...sampleOutput.findings[0], confidence: 0.7 }] };
+    expect(parseReviewOutput(JSON.stringify(fraction)).findings[0]?.confidence).toBe(0.7);
+  });
+
   it("accepts a bare verdict, a Claude envelope and fenced JSON", () => {
     const bare = JSON.stringify(sampleOutput);
     expect(parseReviewOutput(bare).verdict).toBe("request_changes");
