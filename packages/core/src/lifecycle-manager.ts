@@ -2449,8 +2449,14 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     reviewer: ResolvedReviewerConfig,
     headSha: string,
     scm: SCM,
-    ciStatus?: CIStatus,
+    opts: { ciStatus?: CIStatus; prTitle?: string } = {},
   ): Promise<void> {
+    const { ciStatus, prTitle } = opts;
+    // The native reviewer treats the CI result in its context as the test
+    // evidence and never runs tests itself, so wait until CI has settled
+    // (passing, failing is filtered by the caller, none = no CI). The GitHub
+    // review request in the caller still goes out immediately.
+    if (ciStatus === "pending") return;
     if (session.metadata["lastNativeReviewSha"] === headSha) return;
     const projectId = session.projectId;
     const store = createCodeReviewStore(projectId);
@@ -2524,6 +2530,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         scm,
         ...(tracker ? { tracker } : {}),
         ...(ciStatus ? { ciStatus } : {}),
+        ...(prTitle ? { prTitle } : {}),
         runtime,
         agent,
       },
@@ -2606,7 +2613,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // Fork: spawn the AO-native review for this head (own SHA gate + concurrency).
     if (nativeReviewer && scm) {
-      await maybeDispatchNativeReview(session, project, nativeReviewer, headSha, scm, cached.ciStatus).catch((err) => {
+      await maybeDispatchNativeReview(session, project, nativeReviewer, headSha, scm, {
+        ...(cached.ciStatus ? { ciStatus: cached.ciStatus } : {}),
+        ...(cached.title ? { prTitle: cached.title } : {}),
+      }).catch((err) => {
         console.error(
           `[native-review] dispatch failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`,
         );

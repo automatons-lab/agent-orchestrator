@@ -14,6 +14,7 @@ import {
   buildReviewerEnvironment,
   executeNativeReview,
   formatReviewContext,
+  contextPrInfo,
   parseReviewOutput,
   resolveReviewerConfig,
   reviewerCouldNotRun,
@@ -491,5 +492,23 @@ describe("executeNativeReview", () => {
 
   it("silences unused mocks", () => {
     expect(vi.isMockFunction(vi.fn())).toBe(true);
+  });
+});
+
+describe("contextPrInfo", () => {
+  const restored = { number: 6, title: "", branch: "5.add-modulo", baseBranch: "" } as unknown as PRInfo;
+
+  it("fills an empty title from the enrichment and the base branch from the resolved base", () => {
+    const pr = contextPrInfo(restored, "main", "feat: add modulo");
+    expect(pr.title).toBe("feat: add modulo");
+    expect(pr.baseBranch).toBe("main");
+    expect(pr.branch).toBe("5.add-modulo");
+  });
+
+  it("keeps the session's own title when present and tolerates a missing enrichment title", () => {
+    const own = contextPrInfo({ ...restored, title: "own title" }, "main", "other");
+    expect(own.title).toBe("own title");
+    expect(contextPrInfo(restored, "develop").title).toBe("");
+    expect(contextPrInfo(restored, "develop").baseBranch).toBe("develop");
   });
 });

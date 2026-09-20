@@ -528,6 +528,8 @@ export interface NativeReviewDeps {
   keepPaneMs?: number;
   /** CI status of the head from the lifecycle's PR enrichment, for the context file. */
   ciStatus?: CIStatus;
+  /** PR title from the lifecycle's PR enrichment; used when the session's PRInfo has none. */
+  prTitle?: string;
 }
 
 export interface NativeReviewResult {
@@ -561,6 +563,16 @@ function defaultReleasePane(handle: RuntimeHandle, runtime: Runtime, keepMs: num
     void runtime.destroy(handle).catch(() => {});
   }, keepMs);
   timer.unref();
+}
+
+/**
+ * PRInfo as shown in the review context: a session's PRInfo restored from
+ * metadata may lack the title and base branch, so fill them from the PR
+ * enrichment and the resolved base branch.
+ */
+export function contextPrInfo(pr: PRInfo, baseBranch: string, prTitle?: string): PRInfo {
+  const title = pr.title && pr.title.trim().length > 0 ? pr.title : (prTitle ?? pr.title);
+  return { ...pr, title, baseBranch };
 }
 
 export function reviewRoundFor(store: CodeReviewStore, linkedSessionId: string): number {
@@ -625,6 +637,7 @@ export async function executeNativeReview(
   // PRInfo restored from metadata may carry an empty base branch; the project's
   // default branch is the right fallback for the diff base.
   const baseBranch = pr.baseBranch && pr.baseBranch.trim().length > 0 ? pr.baseBranch : project.defaultBranch;
+  const contextPr = contextPrInfo(pr, baseBranch, deps.prTitle);
   const fail = (reason: string): NativeReviewResult => {
     const failed = store.updateRun(
       run.id,
@@ -716,7 +729,7 @@ export async function executeNativeReview(
   atomicWriteFileSync(
     contextFile,
     formatReviewContext({
-      pr,
+      pr: contextPr,
       headSha,
       baseRef,
       ...(mergeBase ? { mergeBase } : {}),
