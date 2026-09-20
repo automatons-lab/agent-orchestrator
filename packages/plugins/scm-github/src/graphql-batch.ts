@@ -757,7 +757,17 @@ async function executeBatchQuery(prs: PRInfo[]): Promise<Record<string, unknown>
   const batchSize = prs.length;
   const adaptiveTimeout = 30_000 + Math.max(0, (batchSize - 10) * 2000);
 
-  const stdout = await execGhAsync(args, adaptiveTimeout, "gh.api.graphql-batch");
+  let stdout: string;
+  try {
+    stdout = await execGhAsync(args, adaptiveTimeout, "gh.api.graphql-batch");
+  } catch (err) {
+    // gh exits 1 whenever the GraphQL response carries `errors`, even when
+    // `data` is complete apart from tolerable FORBIDDEN CheckRun nodes. Keep
+    // the body; the parser below decides whether the errors are tolerable.
+    const partial = partialGraphQLStdout(err);
+    if (partial === null) throw err;
+    stdout = partial;
+  }
 
   // With -i, stdout contains HTTP headers + blank line + JSON body.
   // Split at first blank line to get the JSON body for parsing.
@@ -774,16 +784,73 @@ async function executeBatchQuery(prs: PRInfo[]): Promise<Record<string, unknown>
 
   const result: {
     data?: Record<string, unknown>;
-    errors?: Array<{ message: string; path?: string[] }>;
+    errors?: GraphQLBatchError[];
   } = JSON.parse(body.trim());
 
-  // Check for GraphQL errors and throw to allow individual API fallback
+  // Check for GraphQL errors and throw to allow individual API fallback —
+  // except for the one partial-data case we can live with (see
+  // isCheckRunPermissionError): every other PR field is present and ciStatus
+  // only needs statusCheckRollup.state.
   if (result.errors && result.errors.length > 0) {
-    const errorMsg = result.errors.map((e) => e.message).join("; ");
-    throw new Error(`GraphQL query errors: ${errorMsg}`);
+    if (!result.data || !result.errors.every(isCheckRunPermissionError)) {
+      const errorMsg = result.errors.map((e) => e.message).join("; ");
+      throw new Error(`GraphQL query errors: ${errorMsg}`);
+    }
+    warnCheckRunPermissionOnce(result.errors.length);
   }
 
   return (result.data ?? {}) as Record<string, unknown>;
+}
+
+/** stdout of a failed `gh api graphql` call when it still holds a JSON body with `data`. */
+function partialGraphQLStdout(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const stdout = (err as { stdout?: unknown }).stdout;
+  if (typeof stdout !== "string" || !stdout.includes('"data"')) return null;
+  return stdout;
+}
+
+export interface GraphQLBatchError {
+  message: string;
+  type?: string;
+  path?: Array<string | number>;
+}
+
+/**
+ * Fine-grained personal access tokens have no "Checks" permission to grant, so
+ * expanding `statusCheckRollup.contexts` (CheckRun nodes) fails with FORBIDDEN
+ * while GitHub still returns every other field, including the rollup `state`.
+ * Such errors are tolerable: CI status comes from the rollup, only the
+ * per-check list is missing.
+ */
+export function isCheckRunPermissionError(error: GraphQLBatchError): boolean {
+  const onContexts = Array.isArray(error.path) && error.path.includes("contexts");
+  if (!onContexts) return false;
+  return (
+    error.type === "FORBIDDEN" ||
+    /not accessible by (personal access|integration) token/i.test(error.message)
+  );
+}
+
+let checkRunPermissionWarned = false;
+
+function warnCheckRunPermissionOnce(errorCount: number): void {
+  if (checkRunPermissionWarned) return;
+  checkRunPermissionWarned = true;
+  const summary =
+    "GitHub token cannot read check runs (fine-grained PATs have no checks:read); CI status is derived from statusCheckRollup.state, per-check details are unavailable";
+  console.warn(`[scm-github] ${summary}`);
+  recordActivityEvent({
+    source: "scm",
+    kind: "scm.checks_permission_missing",
+    level: "warn",
+    summary,
+    data: { plugin: "scm-github", errorCount },
+  });
+}
+
+export function _resetCheckRunPermissionWarnedForTesting(): void {
+  checkRunPermissionWarned = false;
 }
 
 /**

@@ -161,6 +161,61 @@ function isNoChecksReportedError(err: unknown): boolean {
 }
 
 /**
+ * `gh pr checks` expands statusCheckRollup.contexts; a fine-grained PAT
+ * (no "Checks" permission exists to grant) gets FORBIDDEN on the CheckRun
+ * nodes and gh gives up. The rollup `state` is still readable, so CI status
+ * can be answered from it.
+ */
+function isCheckRunPermissionFailure(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { message?: unknown; stderr?: unknown; stdout?: unknown };
+  const text = [e.message, e.stderr, e.stdout]
+    .filter((v): v is string => typeof v === "string")
+    .join("\n");
+  return (
+    /not accessible by (personal access|integration) token/i.test(text) &&
+    /statusCheckRollup|contexts/i.test(text)
+  );
+}
+
+/** CI checks reduced to one synthetic entry from statusCheckRollup.state. */
+async function getCIChecksFromRollupState(pr: PRInfo): Promise<CICheck[]> {
+  const raw = await gh([
+    "api",
+    "graphql",
+    "-f",
+    `owner=${pr.owner}`,
+    "-f",
+    `name=${pr.repo}`,
+    "-F",
+    `number=${pr.number}`,
+    "-f",
+    "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}",
+  ]);
+  const parsed = JSON.parse(raw) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          commits?: {
+            nodes?: Array<{ commit?: { statusCheckRollup?: { state?: unknown } | null } }>;
+          };
+        };
+      };
+    };
+  };
+  const state =
+    parsed.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state;
+  if (typeof state !== "string") return [];
+  return [
+    {
+      name: "checks (rollup state)",
+      status: mapRawCheckStateToStatus(state),
+      conclusion: state,
+    },
+  ];
+}
+
+/**
  * Run `gh` with a JSON body on stdin (`--input -`) and optional per-call
  * environment (e.g. an identity `GH_TOKEN`). Kept off `execGhObserved` so the
  * body never reaches argv or the trace; process.env is never mutated.
@@ -964,6 +1019,9 @@ function createGitHubSCM(): SCM {
           }
           if (isUnsupportedPrChecksJsonError(err)) {
             return getCIChecksFromStatusRollup(pr);
+          }
+          if (isCheckRunPermissionFailure(err)) {
+            return getCIChecksFromRollupState(pr);
           }
           throw new Error("Failed to fetch CI checks", { cause: err });
         }

@@ -656,6 +656,24 @@ describe("scm-github plugin", () => {
       await expect(scm.getCIChecks(pr)).rejects.toThrow("Failed to fetch CI checks");
     });
 
+    it("falls back to statusCheckRollup.state when the token cannot read check runs", async () => {
+      mockGhExecError(
+        "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)",
+      );
+      mockGh({
+        data: {
+          repository: {
+            pullRequest: { commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] } },
+          },
+        },
+      });
+      const checks = await scm.getCIChecks(pr);
+      expect(checks).toEqual([{ name: "checks (rollup state)", status: "passed", conclusion: "SUCCESS" }]);
+      const graphqlArgs = ghMock.mock.calls[1]?.[1] as string[];
+      expect(graphqlArgs.slice(0, 2)).toEqual(["api", "graphql"]);
+      expect(graphqlArgs).toContain("number=42");
+    });
+
     it("returns empty array for PR with no checks", async () => {
       mockGh([]);
       expect(await scm.getCIChecks(pr)).toEqual([]);
