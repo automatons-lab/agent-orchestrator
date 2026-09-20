@@ -94,6 +94,13 @@ export interface NormalizeOptions {
    * identities at the declared `agents:` profile their role blocks repeat. Default true.
    */
   identityProfiles?: boolean;
+  /**
+   * Also hoist a scalar/array value shared by every project that sets it
+   * when some projects lack it. Those projects then inherit the value, so
+   * their behaviour changes; the change log names them. Default false: the
+   * command only prints a hint.
+   */
+  hoistMajority?: boolean;
 }
 
 interface RefBlock {
@@ -273,14 +280,18 @@ export interface NormalizeResult {
   normalized: Obj;
   /** Human-readable log of what moved or was removed. */
   changes: string[];
+  /** Things worth doing by hand that the normalizer refused to do silently. */
+  hints: string[];
 }
 
 export function normalizeConfigDocument(raw: Obj, options: NormalizeOptions = {}): NormalizeResult {
   const foldLegacy = options.foldLegacyAgent ?? true;
   const dropGitSteps = options.dropGitIdentitySteps ?? true;
   const identityProfiles = options.identityProfiles ?? true;
+  const hoistMajority = options.hoistMajority ?? false;
   const doc = clone(raw);
   const changes: string[] = [];
+  const hints: string[] = [];
   const projects = isObj(doc["projects"]) ? (doc["projects"] as Record<string, Obj>) : {};
   const defaults: Obj = isObj(doc["defaults"]) ? (doc["defaults"] as Obj) : {};
   doc["defaults"] = defaults;
@@ -362,6 +373,34 @@ export function normalizeConfigDocument(raw: Obj, options: NormalizeOptions = {}
           defaults[key] = next;
           changes.push(`defaults.${key}: hoisted from ${projectList.length} project(s)`);
         }
+      } else if (!isObjectKey) {
+        // Majority case: every project that sets the key agrees, some lack it.
+        // Hoisting would change the projects without it (they would inherit
+        // the value instead of the built-in fallback or the current default),
+        // so it only happens on request; otherwise say what is going on.
+        // Objects are left alone: a partial overlap has no single "value".
+        const entries = Object.entries(projects).filter((e): e is [string, Obj] => isObj(e[1]));
+        const present = entries.filter(([, p]) => p[key] !== undefined);
+        const missing = entries.filter(([, p]) => p[key] === undefined).map(([id]) => id);
+        const shared = present[0]?.[1][key];
+        if (
+          present.length >= 2 &&
+          missing.length > 0 &&
+          present.every(([, p]) => deepEqual(p[key], shared)) &&
+          !deepEqual(defaults[key], shared)
+        ) {
+          const count = `${present.length} of ${entries.length} project(s)`;
+          if (hoistMajority) {
+            defaults[key] = clone(shared);
+            changes.push(`defaults.${key}: hoisted from ${count}; now also applies to ${missing.join(", ")}`);
+          } else {
+            const current = defaults[key] === undefined ? "no default" : `default ${JSON.stringify(defaults[key])}`;
+            hints.push(
+              `defaults.${key}: ${count} share ${JSON.stringify(shared)} (${current}), missing in ${missing.join(", ")} ` +
+                "— not hoisted because that would change them; set it there or pass --hoist-majority",
+            );
+          }
+        }
       }
       const hoisted = defaults[key];
       if (hoisted === undefined) continue;
@@ -379,7 +418,7 @@ export function normalizeConfigDocument(raw: Obj, options: NormalizeOptions = {}
     }
   }
   if (Object.keys(defaults).length === 0) delete doc["defaults"];
-  return { normalized: doc, changes };
+  return { normalized: doc, changes, hints };
 }
 
 /** Fields validation derives (`agentProfile`) are bookkeeping, not behaviour. */

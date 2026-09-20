@@ -261,3 +261,101 @@ describe("deepEqual", () => {
     expect(deepEqual({ a: 1 }, { a: "1" })).toBe(false);
   });
 });
+
+describe("majority hoisting", () => {
+  function minimal(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return { path: `/repos/${id}`, repo: `org/${id}`, defaultBranch: "main", sessionPrefix: id, ...extra };
+  }
+  const template = "{issue}.{slug}";
+  const majority = {
+    defaults: { runtime: "tmux", agent: "codex", workspace: "clone" },
+    projects: {
+      one: minimal("one", { branchNameTemplate: template }),
+      two: minimal("two", { branchNameTemplate: template }),
+      meta: minimal("meta"),
+    },
+  };
+
+  it("only hints when some projects lack the shared value", () => {
+    const { normalized, changes, hints } = normalizeConfigDocument(majority);
+    const defaults = normalized["defaults"] as Record<string, unknown>;
+    const projects = normalized["projects"] as Record<string, Record<string, unknown>>;
+    expect(defaults["branchNameTemplate"]).toBeUndefined();
+    expect(projects["one"]!["branchNameTemplate"]).toBe(template);
+    expect(changes.filter((c) => c.includes("branchNameTemplate"))).toEqual([]);
+    expect(hints).toEqual([
+      `defaults.branchNameTemplate: 2 of 3 project(s) share "{issue}.{slug}" (no default), missing in meta — not hoisted because that would change them; set it there or pass --hoist-majority`,
+    ]);
+    expect(diffEffectiveProjects(majority, normalized)).toEqual([]);
+  });
+
+  it("hoists on request and names the projects whose behaviour changes", () => {
+    const { normalized, changes, hints } = normalizeConfigDocument(majority, { hoistMajority: true });
+    const defaults = normalized["defaults"] as Record<string, unknown>;
+    const projects = normalized["projects"] as Record<string, Record<string, unknown>>;
+    expect(defaults["branchNameTemplate"]).toBe(template);
+    expect(projects["one"]!["branchNameTemplate"]).toBeUndefined();
+    expect(projects["two"]!["branchNameTemplate"]).toBeUndefined();
+    expect(hints).toEqual([]);
+    expect(changes).toEqual(
+      expect.arrayContaining([
+        "defaults.branchNameTemplate: hoisted from 2 of 3 project(s); now also applies to meta",
+        "projects.one.branchNameTemplate: removed (equals defaults)",
+        "projects.two.branchNameTemplate: removed (equals defaults)",
+      ]),
+    );
+    expect(diffEffectiveProjects(majority, normalized)).toEqual([
+      { project: "meta", key: "branchNameTemplate", before: undefined, after: template },
+    ]);
+    // Idempotent: a second pass has nothing left to do.
+    const again = normalizeConfigDocument(normalized, { hoistMajority: true });
+    expect(again.changes.filter((c) => c.includes("branchNameTemplate"))).toEqual([]);
+    expect(again.hints).toEqual([]);
+  });
+
+  it("reports a default the majority overrides, and stays quiet when values differ or only one project sets the key", () => {
+    const overriding = {
+      ...majority,
+      defaults: { ...majority.defaults, branchNameTemplate: "feat/{issue}" },
+    };
+    const { hints, normalized } = normalizeConfigDocument(overriding);
+    expect(hints).toEqual([
+      `defaults.branchNameTemplate: 2 of 3 project(s) share "{issue}.{slug}" (default "feat/{issue}"), missing in meta — not hoisted because that would change them; set it there or pass --hoist-majority`,
+    ]);
+    expect((normalized["defaults"] as Record<string, unknown>)["branchNameTemplate"]).toBe("feat/{issue}");
+    const forced = normalizeConfigDocument(overriding, { hoistMajority: true });
+    expect(diffEffectiveProjects(overriding, forced.normalized)).toEqual([
+      { project: "meta", key: "branchNameTemplate", before: "feat/{issue}", after: template },
+    ]);
+
+    const differing = {
+      ...majority,
+      projects: { ...majority.projects, two: minimal("two", { branchNameTemplate: "feat/{issue}" }) },
+    };
+    expect(normalizeConfigDocument(differing).hints).toEqual([]);
+    expect(normalizeConfigDocument(differing, { hoistMajority: true }).changes.filter((c) => c.includes("branchNameTemplate"))).toEqual([]);
+
+    const single = { ...majority, projects: { one: minimal("one", { branchNameTemplate: template }), meta: minimal("meta") } };
+    expect(normalizeConfigDocument(single).hints).toEqual([]);
+    expect((normalizeConfigDocument(single, { hoistMajority: true }).normalized["defaults"] as Record<string, unknown>)["branchNameTemplate"]).toBeUndefined();
+  });
+
+  it("hoists arrays the same way and leaves objects to the exact-match rule", () => {
+    const arrays = {
+      defaults: { runtime: "tmux" },
+      projects: {
+        one: minimal("one", { reviewers: ["trinity"], worker: { agentConfig: { model: "x" } } }),
+        two: minimal("two", { reviewers: ["trinity"], worker: { agentConfig: { model: "x" } } }),
+        meta: minimal("meta"),
+      },
+    };
+    const { hints } = normalizeConfigDocument(arrays);
+    expect(hints).toEqual([
+      `defaults.reviewers: 2 of 3 project(s) share ["trinity"] (no default), missing in meta — not hoisted because that would change them; set it there or pass --hoist-majority`,
+    ]);
+    const forced = normalizeConfigDocument(arrays, { hoistMajority: true });
+    expect((forced.normalized["defaults"] as Record<string, unknown>)["reviewers"]).toEqual(["trinity"]);
+    expect((forced.normalized["defaults"] as Record<string, unknown>)["worker"]).toBeUndefined();
+    expect(forced.hints).toEqual([]);
+  });
+});

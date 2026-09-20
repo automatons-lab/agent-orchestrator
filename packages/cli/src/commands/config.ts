@@ -158,17 +158,22 @@ export function registerConfig(program: Command): void {
     .option("--keep-legacy-agent", "Leave project-level agent/agentConfig in place")
     .option("--keep-git-identity-steps", "Leave git config user.* postCreate steps in place")
     .option("--keep-github-user", "Leave githubUser references and per-role agent settings in place")
-    .action((opts: { write?: boolean; out?: string; keepLegacyAgent?: boolean; keepGitIdentitySteps?: boolean; keepGithubUser?: boolean }) => {
+    .option(
+      "--hoist-majority",
+      "Also hoist a value shared by every project that sets it when some projects lack it (those projects change; they are listed)",
+    )
+    .action((opts: { write?: boolean; out?: string; keepLegacyAgent?: boolean; keepGitIdentitySteps?: boolean; keepGithubUser?: boolean; hoistMajority?: boolean }) => {
       const path = findConfigFile();
       if (!path) {
         console.error(chalk.red("No config file found (set AO_CONFIG_PATH or run from a project)."));
         process.exit(1);
       }
       const raw = parseYaml(readFileSync(path, "utf-8")) as Record<string, unknown>;
-      const { normalized, changes } = normalizeConfigDocument(raw, {
+      const { normalized, changes, hints } = normalizeConfigDocument(raw, {
         foldLegacyAgent: !opts.keepLegacyAgent,
         dropGitIdentitySteps: !opts.keepGitIdentitySteps,
         identityProfiles: !opts.keepGithubUser,
+        hoistMajority: opts.hoistMajority ?? false,
       });
       const diff = diffEffectiveProjects(raw, normalized);
       const yaml = stringifyYaml(normalized, { lineWidth: 0 });
@@ -184,6 +189,10 @@ export function registerConfig(program: Command): void {
       }
       console.error(chalk.bold(`\n${changes.length} change(s):`));
       for (const change of changes) console.error(`  - ${change}`);
+      if (hints.length > 0) {
+        console.error(chalk.bold(`${hints.length} hint(s):`));
+        for (const hint of hints) console.error(chalk.yellow(`  - ${hint}`));
+      }
       if (diff.length === 0) {
         console.error(chalk.green("Effective project behaviour is unchanged."));
       } else {
@@ -191,7 +200,7 @@ export function registerConfig(program: Command): void {
         for (const d of diff) {
           console.error(`  - ${d.project}.${d.key}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`);
         }
-        console.error(chalk.dim("Expected only for folded legacy agent fields and removed git identity steps."));
+        console.error(chalk.dim("Expected only for folded legacy agent fields, removed git identity steps and --hoist-majority."));
       }
       if (opts.write || opts.out) {
         console.error(chalk.dim("Comments in the original file are not preserved."));
