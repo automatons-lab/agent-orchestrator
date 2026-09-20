@@ -46,13 +46,15 @@ describe("normalizeConfigDocument", () => {
     expect(defaults["branchNameTemplate"]).toBe("{issue}.{slug}");
     expect(defaults["agentRulesFile"]).toBe("/rules/coder.md");
     expect(defaults["reviewers"]).toEqual(["trinity"]);
-    // Every worker block agrees on agent, model and permissions, so they move
-    // into the neo identity; reasoningEffort differs (xhigh vs high) and stays per project.
-    expect(normalized["identities"]).toEqual({
-      neo: { tokenEnv: "NEO_TOKEN", agent: "codex", model: "gpt-6-astra", permissions: "permissionless" },
-      trinity: { tokenEnv: "TRI_TOKEN" },
+    // No agents: are declared, so agent settings stay on the role blocks and the
+    // generic hoist collects what every project repeats; reasoningEffort differs
+    // (xhigh vs high) and stays per project.
+    expect(normalized["identities"]).toEqual({ neo: { tokenEnv: "NEO_TOKEN" }, trinity: { tokenEnv: "TRI_TOKEN" } });
+    expect(defaults["worker"]).toEqual({
+      identity: "neo",
+      agent: "codex",
+      agentConfig: { model: "gpt-6-astra", permissions: "permissionless" },
     });
-    expect(defaults["worker"]).toEqual({ identity: "neo" });
     expect(defaults["postCreate"]).toBeUndefined();
 
     expect(projects["one"]).toEqual({
@@ -78,18 +80,21 @@ describe("normalizeConfigDocument", () => {
         expect.stringMatching(/projects\.one: removed 2 git identity postCreate step/),
         "defaults.branchNameTemplate: hoisted from 2 project(s)",
         "defaults.worker: githubUser neo → identity neo",
-        "identities.neo.model: hoisted from projects.one.worker, projects.two.worker",
-        "projects.one.worker.agentConfig.model: removed (identity neo provides it)",
-        "projects.two.worker.agent: removed (identity neo provides it)",
+        "projects.two.worker: kept only overrides",
       ]),
     );
   });
 
-  describe("identity profiles", () => {
+  describe("identity and agent profiles", () => {
     const identities = {
       neo: { tokenEnv: "NEO", githubUser: "neo-automaton" },
       tri: { tokenEnv: "TRI", githubUser: "trinity-automaton" },
       synty: { tokenEnv: "SYN", githubUser: "synty-automaton" },
+    };
+    const agents = {
+      "codex-coder": { plugin: "codex", model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
+      "codex-reviewer": { plugin: "codex", model: "gpt-6-astra", reasoningEffort: "xhigh", sandbox: "danger-full-access" },
+      "codex-orchestrator": { plugin: "codex" },
     };
     const plain = (id: string, extra: Record<string, unknown> = {}) => ({
       path: `/repos/${id}`,
@@ -98,25 +103,27 @@ describe("normalizeConfigDocument", () => {
       sessionPrefix: id,
       ...extra,
     });
+    const legacyDefaults = () => ({
+      scm: { plugin: "github", githubUser: "neo-automaton" },
+      worker: {
+        githubUser: "neo-automaton",
+        agent: "codex",
+        agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
+      },
+      reviewer: {
+        githubUser: "trinity-automaton",
+        agent: "codex",
+        agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", sandbox: "danger-full-access" },
+        enabled: false,
+      },
+      orchestrator: { githubUser: "synty-automaton", agent: "codex" },
+    });
 
-    it("rewrites login references to identity keys and moves shared agent settings into the identity", () => {
+    it("rewrites login references to identity keys and points identities at the matching profile", () => {
       const doc = {
+        agents,
         identities,
-        defaults: {
-          scm: { plugin: "github", githubUser: "neo-automaton" },
-          worker: {
-            githubUser: "neo-automaton",
-            agent: "codex",
-            agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
-          },
-          reviewer: {
-            githubUser: "trinity-automaton",
-            agent: "codex",
-            agentConfig: { model: "gpt-6-astra", sandbox: "danger-full-access" },
-            enabled: false,
-          },
-          orchestrator: { githubUser: "synty-automaton", agent: "codex" },
-        },
+        defaults: legacyDefaults(),
         projects: {
           one: plain("one"),
           two: plain("two", { worker: { agentConfig: { reasoningEffort: "high" } } }),
@@ -126,63 +133,85 @@ describe("normalizeConfigDocument", () => {
       const defaults = normalized["defaults"] as Record<string, unknown>;
       const projects = normalized["projects"] as Record<string, Record<string, unknown>>;
       expect(normalized["identities"]).toEqual({
-        neo: { tokenEnv: "NEO", githubUser: "neo-automaton", agent: "codex", model: "gpt-6-astra", permissions: "permissionless" },
-        tri: { tokenEnv: "TRI", githubUser: "trinity-automaton", agent: "codex", model: "gpt-6-astra" },
-        synty: { tokenEnv: "SYN", githubUser: "synty-automaton", agent: "codex" },
+        neo: { tokenEnv: "NEO", githubUser: "neo-automaton", agent: "codex-coder" },
+        tri: { tokenEnv: "TRI", githubUser: "trinity-automaton", agent: "codex-reviewer" },
+        synty: { tokenEnv: "SYN", githubUser: "synty-automaton", agent: "codex-orchestrator" },
       });
+      expect(normalized["agents"]).toEqual(agents);
       expect(defaults["scm"]).toEqual({ plugin: "github", identity: "neo" });
-      expect(defaults["worker"]).toEqual({ identity: "neo", agentConfig: { reasoningEffort: "xhigh" } });
-      expect(defaults["reviewer"]).toEqual({ identity: "tri", agentConfig: { sandbox: "danger-full-access" }, enabled: false });
+      expect(defaults["worker"]).toEqual({ identity: "neo" });
+      expect(defaults["reviewer"]).toEqual({ identity: "tri", enabled: false });
       expect(defaults["orchestrator"]).toEqual({ identity: "synty" });
       expect(projects["one"]!["worker"]).toBeUndefined();
+      // two's own reasoningEffort stays as an override of the profile.
       expect(projects["two"]!["worker"]).toEqual({ agentConfig: { reasoningEffort: "high" } });
       expect(changes).toEqual(
         expect.arrayContaining([
           "defaults.scm: githubUser neo-automaton → identity neo",
           "defaults.worker: githubUser neo-automaton → identity neo",
-          "identities.neo.agent: hoisted from defaults.worker",
-          "defaults.worker.agent: removed (identity neo provides it)",
-          "identities.tri.model: hoisted from defaults.reviewer",
+          "identities.neo.agent: → codex-coder (matches agents.codex-coder)",
+          "defaults.worker.agent: removed (agents.codex-coder provides it)",
+          "defaults.worker.agentConfig.reasoningEffort: removed (agents.codex-coder provides it)",
+          "identities.tri.agent: → codex-reviewer (matches agents.codex-reviewer)",
+          "defaults.reviewer.agentConfig.sandbox: removed (agents.codex-reviewer provides it)",
+          "identities.synty.agent: → codex-orchestrator (matches agents.codex-orchestrator)",
         ]),
       );
       expect(diffEffectiveProjects(doc, normalized)).toEqual([]);
+      // Idempotent: a second pass finds nothing left to move.
+      const again = normalizeConfigDocument(normalized);
+      expect(again.changes.filter((c) => c.startsWith("identities.") || c.includes("provides it"))).toEqual([]);
     });
 
-    it("keeps a defaults value in place when a project with another identity inherits it", () => {
+    it("keeps defaults fields in place when a project with another identity inherits them", () => {
       const doc = {
+        agents,
         identities,
-        defaults: { worker: { identity: "neo", agent: "codex", agentConfig: { model: "gpt-6-astra" } } },
+        defaults: { worker: { identity: "neo", agent: "codex", agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" } } },
         projects: {
           one: plain("one"),
           other: plain("other", { worker: { identity: "tri" } }),
         },
       };
       const { normalized } = normalizeConfigDocument(doc);
-      const defaults = normalized["defaults"] as Record<string, unknown>;
-      // `other` runs as tri but takes agent/model from defaults.worker; moving
-      // them into neo would change what `other` runs with.
+      // `other` runs as tri but takes the agent settings from defaults.worker;
+      // moving them into codex-coder behind neo would change what `other` runs with.
       expect(normalized["identities"]).toEqual(identities);
-      expect(defaults["worker"]).toEqual({ identity: "neo", agent: "codex", agentConfig: { model: "gpt-6-astra" } });
+      expect((normalized["defaults"] as Record<string, unknown>)["worker"]).toEqual(doc.defaults.worker);
       expect(diffEffectiveProjects(doc, normalized)).toEqual([]);
     });
 
-    it("leaves unknown logins, conflicting values and opted-out documents alone", () => {
-      const doc = {
-        identities: { ...identities, neo: { ...identities.neo, model: "other-model" } },
-        defaults: { worker: { githubUser: "ghost" }, reviewer: { githubUser: "neo-automaton", agentConfig: { model: "gpt-6-astra" } } },
+    it("leaves blocks alone without a matching profile, with a bare-plugin identity, or when opted out", () => {
+      const noMatch = normalizeConfigDocument({
+        agents: { "claude-fast": { plugin: "claude-code", model: "opus" } },
+        identities,
+        defaults: { worker: { githubUser: "neo-automaton", agent: "codex", agentConfig: { model: "gpt-6-astra" } } },
         projects: { one: plain("one") },
-      };
-      const { normalized, changes } = normalizeConfigDocument(doc);
-      const defaults = normalized["defaults"] as Record<string, unknown>;
-      expect(defaults["worker"]).toEqual({ githubUser: "ghost" });
-      expect(defaults["reviewer"]).toEqual({ identity: "neo", agentConfig: { model: "gpt-6-astra" } });
-      expect(changes).toContain("defaults.reviewer: githubUser neo-automaton → identity neo");
+      });
+      expect(noMatch.normalized["identities"]).toEqual(identities);
+      expect((noMatch.normalized["defaults"] as Record<string, unknown>)["worker"]).toEqual({
+        identity: "neo",
+        agent: "codex",
+        agentConfig: { model: "gpt-6-astra" },
+      });
+
+      const bare = normalizeConfigDocument({
+        agents,
+        identities: { ...identities, neo: { ...identities.neo, agent: "codex" } },
+        defaults: { worker: { identity: "neo", agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" } } },
+        projects: { one: plain("one") },
+      });
+      expect((bare.normalized["identities"] as Record<string, unknown>)["neo"]).toEqual({ ...identities.neo, agent: "codex" });
+      expect((bare.normalized["defaults"] as Record<string, unknown>)["worker"]).toEqual({
+        identity: "neo",
+        agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
+      });
 
       const kept = normalizeConfigDocument(
-        { identities, defaults: { worker: { githubUser: "neo-automaton", agent: "codex" } }, projects: { one: plain("one") } },
+        { agents, identities, defaults: legacyDefaults(), projects: { one: plain("one") } },
         { identityProfiles: false },
       ).normalized;
-      expect((kept["defaults"] as Record<string, unknown>)["worker"]).toEqual({ githubUser: "neo-automaton", agent: "codex" });
+      expect((kept["defaults"] as Record<string, unknown>)["worker"]).toEqual(legacyDefaults().worker);
     });
   });
 

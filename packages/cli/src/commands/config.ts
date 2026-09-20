@@ -141,7 +141,7 @@ export function registerConfig(program: Command): void {
           console.error(chalk.red(`Unknown project "${opts.project}" in ${path}`));
           process.exit(1);
         }
-        out = { identities: printable["identities"], project: project };
+        out = { agents: printable["agents"], identities: printable["identities"], project: project };
       }
       console.log(opts.json ? JSON.stringify(out, null, 2) : stringifyYaml(out, { lineWidth: 0 }));
     });

@@ -57,10 +57,10 @@ describe("resolveIdentity", () => {
     expect(resolveIdentity(cfg, "ghost", env)).toBeUndefined();
   });
 
-  it("resolves a profile by key or by its login and carries the agent settings", () => {
+  it("resolves a profile by key or by its login and carries the agent reference", () => {
     const cfg = validateConfig({
       identities: {
-        neo: { tokenEnv: "NEO_TOKEN", githubUser: "neo-automaton", agent: "codex", model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
+        neo: { tokenEnv: "NEO_TOKEN", githubUser: "neo-automaton", agent: "codex-coder" },
         "neo-claude": { tokenEnv: "NEO_TOKEN", githubUser: "neo-automaton", agent: "claude-code" },
         tri: { tokenEnv: "TRI_TOKEN", githubUser: "trinity-automaton" },
       },
@@ -73,10 +73,7 @@ describe("resolveIdentity", () => {
       token: "t",
       name: "neo-automaton",
       email: "neo-automaton@users.noreply.github.com",
-      agent: "codex",
-      model: "gpt-6-astra",
-      reasoningEffort: "xhigh",
-      permissions: "permissionless",
+      agent: "codex-coder",
     });
     expect(resolveIdentity(cfg, "trinity-automaton", {})?.id).toBe("tri");
     // two profiles share the login: only the key can tell them apart

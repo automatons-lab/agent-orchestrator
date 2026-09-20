@@ -1525,7 +1525,9 @@ export interface OrchestratorConfig {
 
   /** Default plugin selections */
   defaults: DefaultPlugins;
-  /** GitHub identities referenced by role `githubUser` fields (fork). */
+  /** Agent profiles referenced by `identities.<id>.agent` and role `agent` fields (fork). */
+  agents?: Record<string, AgentProfileConfig>;
+  /** Identities referenced by role and scm `identity` fields (fork). */
   identities?: Record<string, IdentityConfig>;
 
   /** Installer-managed external plugin descriptors */
@@ -1645,11 +1647,26 @@ export interface DefaultPlugins extends ProjectBehaviorDefaults {
 }
 
 /**
- * An identity AO can act as (fork): a GitHub user plus the agent that user
- * runs. Keyed by a free id under `identities:`; the token is read from the
- * environment variable `tokenEnv` and never stored in the config file. Roles
- * reference an identity by key and inherit `githubUser`, `agent`, `model`,
- * `reasoningEffort` and `permissions` unless they set their own.
+ * An agent profile (fork): which agent plugin to run and with what settings.
+ * Keyed by a free id under `agents:` (`codex-coder`, `codex-reviewer`,
+ * `claude-fast`, ...). Everything but `plugin` becomes the role's
+ * `agentConfig` (`model`, `reasoningEffort`, `permissions`, `sandbox`, ...).
+ */
+export interface AgentProfileConfig {
+  /** Agent plugin name (`codex`, `claude-code`, `opencode`, ...). */
+  plugin: string;
+  model?: string;
+  reasoningEffort?: string;
+  permissions?: AgentPermissionMode | LegacyAgentPermissionMode;
+  [key: string]: unknown;
+}
+
+/**
+ * An identity AO can act as (fork): a GitHub user plus the agent profile that
+ * user runs. Keyed by a free id under `identities:`; the token is read from
+ * the environment variable `tokenEnv` and never stored in the config file.
+ * Roles reference an identity by key and inherit `githubUser` and the agent
+ * unless they set their own.
  */
 export interface IdentityConfig {
   tokenEnv: string;
@@ -1659,11 +1676,8 @@ export interface IdentityConfig {
   name?: string;
   /** Git author email; defaults to `<login>@users.noreply.github.com`. */
   email?: string;
-  /** Agent plugin (`codex`, `claude-code`, ...) for roles using this identity. */
+  /** Key of `agents:` (or a bare agent plugin name) roles with this identity run. */
   agent?: string;
-  model?: string;
-  reasoningEffort?: string;
-  permissions?: AgentPermissionMode | LegacyAgentPermissionMode;
 }
 
 export type InstalledPluginSource = "registry" | "npm" | "local";
@@ -1693,7 +1707,14 @@ export interface RoleAgentConfig {
   identity?: string;
   /** GitHub login of that identity (filled at validation; legacy reference form). */
   githubUser?: string;
+  /**
+   * Agent reference: a key of `agents:` or a bare plugin name. After
+   * validation this is always the plugin name; the profile key, if one was
+   * used, is kept in `agentProfile`.
+   */
   agent?: string;
+  /** Key of `agents:` the agent settings came from (filled at validation, fork). */
+  agentProfile?: string;
   agentConfig?: AgentSpecificConfig;
 }
 

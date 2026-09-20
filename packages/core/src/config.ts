@@ -25,7 +25,7 @@ import {
   type OrchestratorConfig,
 } from "./types.js";
 import { generateSessionPrefix } from "./paths.js";
-import { findIdentityKey, identityLogin } from "./identity-lookup.js";
+import { findIdentityKey, identityLogin, resolveAgentRef } from "./identity-lookup.js";
 import { getDefaultRuntime } from "./platform.js";
 import {
   getGlobalConfigPath,
@@ -271,14 +271,38 @@ const ReviewerConfigSchema = RoleConfigSchema.extend({
 /** GitHub login syntax (alphanumerics and single hyphens, optional [bot] suffix). */
 const IDENTITY_LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?(?:\[bot\])?$/;
 
-/** Identity keys are free ids (`neo`, `trinity-codex`); the login lives in `githubUser`. */
+/** Identity and agent-profile keys are free ids (`neo`, `codex-coder`); a login may end in `[bot]`. */
 const IDENTITY_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}(?:\[bot\])?$/;
+const AGENT_PROFILE_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
 
 /**
- * One identity: who a role is on GitHub and which agent it runs. Tokens never
- * live in the config file; `tokenEnv` names the environment variable that
- * carries them. Roles reference an identity by key and inherit its agent
- * settings, so the same profile is declared once for every role and project.
+ * One agent profile: the agent plugin plus the settings it runs with. Every
+ * key but `plugin` becomes `agentConfig` of the roles that use the profile
+ * (`model`, `reasoningEffort`, `permissions`, `sandbox`, ...), so a profile is
+ * declared once and shared by identities, roles and projects.
+ */
+const AgentProfileSchema = z
+  .object({
+    plugin: z.string().min(1, "agents.<id>.plugin must name an agent plugin"),
+    model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+    permissions: RolePermissionSchema,
+    orchestratorModel: z.string().optional(),
+  })
+  .passthrough();
+
+const AgentProfilesSchema = z
+  .record(
+    z.string().regex(AGENT_PROFILE_KEY_RE, "agents keys must match [a-zA-Z0-9][a-zA-Z0-9_.-]*"),
+    AgentProfileSchema,
+  )
+  .default({});
+
+/**
+ * One identity: who a role is on GitHub and which agent profile it runs.
+ * Tokens never live in the config file; `tokenEnv` names the environment
+ * variable that carries them. Roles reference an identity by key and inherit
+ * its login and agent, so each is declared once for every role and project.
  */
 const IdentityConfigSchema = z
   .object({
@@ -292,11 +316,8 @@ const IdentityConfigSchema = z
       .optional(),
     name: z.string().optional(),
     email: z.string().optional(),
-    /** Agent plugin and settings every role referencing this identity runs with. */
+    /** Key of `agents:` (or a bare agent plugin name) roles with this identity run. */
     agent: z.string().optional(),
-    model: z.string().optional(),
-    reasoningEffort: z.string().optional(),
-    permissions: RolePermissionSchema,
   })
   .passthrough();
 
@@ -518,6 +539,8 @@ const OrchestratorConfigSchema = z.object({
   lifecycle: LifecycleConfigSchema,
   observability: ObservabilityConfigSchema,
   defaults: DefaultPluginsSchema.default({}),
+  /** Agent profiles referenced by `identities.<id>.agent` and role `agent` fields (fork). */
+  agents: AgentProfilesSchema,
   /** Identities referenced by role and scm `identity` fields (fork). */
   identities: IdentitiesSchema,
   plugins: z.array(InstalledPluginConfigSchema).default([]),
@@ -823,17 +846,15 @@ function withoutInheritedIdentityRef(base: unknown, override: unknown): unknown 
 }
 
 /**
- * Resolve one role or scm block against `identities:`: `identity: <key>` (or
- * the legacy `githubUser: <login>`) is checked, both reference fields are
- * filled, and for roles the identity's agent settings are copied into the
- * block wherever the block leaves them unset. Explicit block fields always win.
+ * Resolve the identity reference of one role or scm block: `identity: <key>`
+ * (or the legacy `githubUser: <login>`) is checked and both fields are filled.
+ * Returns the identity key, or undefined when the block names none.
  */
-function resolveIdentityBlock(
+function resolveIdentityRef(
   config: OrchestratorConfig,
   block: Record<string, unknown>,
   where: string,
-  options: { agentFields: boolean },
-): void {
+): string | undefined {
   const identities = config.identities ?? {};
   const known = Object.keys(identities);
   const describeKnown =
@@ -852,9 +873,8 @@ function resolveIdentityBlock(
       throw new Error(`${where} references unknown githubUser "${login}". ${describeKnown}.`);
     }
   } else {
-    return;
+    return undefined;
   }
-  const entry = identities[key]!;
   const entryLogin = identityLogin(identities, key);
   if (login !== undefined && login !== entryLogin) {
     throw new Error(
@@ -864,32 +884,50 @@ function resolveIdentityBlock(
   }
   block["identity"] = key;
   block["githubUser"] = entryLogin;
-  if (!options.agentFields) return;
-  if (block["agent"] === undefined && entry.agent !== undefined) block["agent"] = entry.agent;
-  const fromIdentity: Record<string, unknown> = {};
-  if (entry.model !== undefined) fromIdentity["model"] = entry.model;
-  if (entry.reasoningEffort !== undefined) fromIdentity["reasoningEffort"] = entry.reasoningEffort;
-  if (entry.permissions !== undefined) fromIdentity["permissions"] = entry.permissions;
-  if (Object.keys(fromIdentity).length > 0) {
-    block["agentConfig"] = mergeConfigValues(fromIdentity, block["agentConfig"]);
+  return key;
+}
+
+/**
+ * Resolve the agent of one role block: the block's own `agent` reference, else
+ * the identity's. A reference naming a key of `agents:` expands to that
+ * profile's plugin plus its settings under `agentConfig` (the block's own
+ * `agentConfig` keys win); anything else is taken as a bare plugin name.
+ */
+function resolveRoleAgent(
+  config: OrchestratorConfig,
+  block: Record<string, unknown>,
+  identityKey: string | undefined,
+): void {
+  const own = typeof block["agent"] === "string" ? block["agent"] : undefined;
+  const inherited = identityKey !== undefined ? config.identities?.[identityKey]?.agent : undefined;
+  const ref = own ?? inherited;
+  if (ref === undefined) return;
+  const resolved = resolveAgentRef(config.agents, ref);
+  block["agent"] = resolved.plugin;
+  if (resolved.profile === undefined) return;
+  block["agentProfile"] = resolved.profile;
+  if (Object.keys(resolved.config).length > 0) {
+    block["agentConfig"] = mergeConfigValues(resolved.config, block["agentConfig"]);
   }
 }
 
 /**
- * Expand identity references (fork). Runs after defaults were merged into the
- * projects so a project's own `identity` wins over the defaults', and before
- * anything reads `githubUser` / `agent` / `agentConfig` off a role. Also
- * rejects a project that would review its own PRs: worker and an enabled
- * reviewer must be different GitHub users.
+ * Expand identity and agent-profile references (fork). Runs after defaults
+ * were merged into the projects so a project's own `identity` / `agent` wins
+ * over the defaults', and before anything reads `githubUser` / `agent` /
+ * `agentConfig` off a role. Also rejects a project that would review its own
+ * PRs: worker and an enabled reviewer must be different GitHub users.
  */
 function applyIdentityProfiles(config: OrchestratorConfig): OrchestratorConfig {
   const defaults = config.defaults as unknown as Record<string, unknown> | undefined;
   const resolveOwner = (owner: Record<string, unknown>, prefix: string): void => {
     const scm = owner["scm"];
-    if (isPlainObject(scm)) resolveIdentityBlock(config, scm, `${prefix}.scm`, { agentFields: false });
+    if (isPlainObject(scm)) resolveIdentityRef(config, scm, `${prefix}.scm`);
     for (const role of ["worker", "orchestrator", "reviewer"] as const) {
       const block = owner[role];
-      if (isPlainObject(block)) resolveIdentityBlock(config, block, `${prefix}.${role}`, { agentFields: true });
+      if (!isPlainObject(block)) continue;
+      const identityKey = resolveIdentityRef(config, block, `${prefix}.${role}`);
+      resolveRoleAgent(config, block, identityKey);
     }
   };
   if (defaults) resolveOwner(defaults, "defaults");

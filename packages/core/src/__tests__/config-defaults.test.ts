@@ -191,22 +191,21 @@ describe("identities validation", () => {
   });
 });
 
-describe("identity profiles", () => {
+describe("identity and agent profiles", () => {
+  const agents = {
+    "codex-coder": { plugin: "codex", model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
+    "codex-reviewer": { plugin: "codex", model: "gpt-6-astra", sandbox: "danger-full-access" },
+    "claude-fast": { plugin: "claude-code", model: "opus" },
+  };
   const identities = {
-    neo: {
-      tokenEnv: "NEO_TOKEN",
-      githubUser: "neo-automaton",
-      agent: "codex",
-      model: "gpt-6-astra",
-      reasoningEffort: "xhigh",
-      permissions: "permissionless",
-    },
-    trinity: { tokenEnv: "TRI_TOKEN", githubUser: "trinity-automaton", agent: "claude-code", model: "opus" },
+    neo: { tokenEnv: "NEO_TOKEN", githubUser: "neo-automaton", agent: "codex-coder" },
+    trinity: { tokenEnv: "TRI_TOKEN", githubUser: "trinity-automaton", agent: "claude-fast" },
     synty: { tokenEnv: "SYN_TOKEN", githubUser: "synty-automaton" },
   };
 
-  it("fills githubUser, agent and agentConfig from the identity, explicit role fields winning", () => {
+  it("fills githubUser, agent and agentConfig from the identity's profile, explicit role fields winning", () => {
     const cfg = validateConfig({
+      agents,
       identities,
       defaults: {
         scm: { plugin: "github", identity: "synty" },
@@ -220,6 +219,7 @@ describe("identity profiles", () => {
       identity: "neo",
       githubUser: "neo-automaton",
       agent: "codex",
+      agentProfile: "codex-coder",
       agentConfig: { model: "gpt-6-astra", reasoningEffort: "xhigh", permissions: "permissionless" },
     });
     expect(cfg.defaults.scm).toEqual({ plugin: "github", identity: "synty", githubUser: "synty-automaton" });
@@ -228,21 +228,45 @@ describe("identity profiles", () => {
       identity: "neo",
       githubUser: "neo-automaton",
       agent: "codex",
+      agentProfile: "codex-coder",
       agentConfig: { model: "gpt-6-astra", reasoningEffort: "high", permissions: "permissionless" },
     });
     expect(p.reviewer).toEqual({
       identity: "trinity",
       githubUser: "trinity-automaton",
       agent: "claude-code",
+      agentProfile: "claude-fast",
       agentConfig: { model: "sonnet", sandbox: "read-only" },
       enabled: true,
     });
+    // synty has no agent: the role's bare plugin name stands, nothing is merged.
     expect(p.orchestrator).toEqual({ identity: "synty", githubUser: "synty-automaton", agent: "codex" });
     expect(p.scm).toEqual({ plugin: "github", identity: "synty", githubUser: "synty-automaton" });
   });
 
+  it("lets a role pick its own profile or a bare plugin over the identity's agent", () => {
+    const cfg = validateConfig({
+      agents,
+      identities,
+      defaults: { worker: { identity: "neo" } },
+      projects: {
+        profile: project({ path: "/repos/p", sessionPrefix: "p", worker: { agent: "codex-reviewer" } }),
+        bare: project({ path: "/repos/b", sessionPrefix: "b", worker: { agent: "claude-code" } }),
+      },
+    });
+    expect(cfg.projects["profile"]!.worker).toEqual({
+      identity: "neo",
+      githubUser: "neo-automaton",
+      agent: "codex",
+      agentProfile: "codex-reviewer",
+      agentConfig: { model: "gpt-6-astra", sandbox: "danger-full-access" },
+    });
+    expect(cfg.projects["bare"]!.worker).toEqual({ identity: "neo", githubUser: "neo-automaton", agent: "claude-code" });
+  });
+
   it("lets a project pick another identity than the defaults, by key or by login", () => {
     const cfg = validateConfig({
+      agents,
       identities,
       defaults: { worker: { identity: "neo" }, reviewer: { identity: "trinity" } },
       projects: {
@@ -255,6 +279,7 @@ describe("identity profiles", () => {
         identity: "trinity",
         githubUser: "trinity-automaton",
         agent: "claude-code",
+        agentProfile: "claude-fast",
         agentConfig: { model: "opus" },
       });
     }
@@ -262,12 +287,14 @@ describe("identity profiles", () => {
 
   it("resolves the legacy githubUser reference by key and by login", () => {
     const cfg = validateConfig({
+      agents,
       identities: { ...identities, "dependabot[bot]": { tokenEnv: "BOT_TOKEN" } },
       defaults: { worker: { githubUser: "neo-automaton" }, orchestrator: { githubUser: "dependabot[bot]" } },
       projects: { app: project() },
     });
     expect(cfg.projects["app"]!.worker?.identity).toBe("neo");
     expect(cfg.projects["app"]!.worker?.agent).toBe("codex");
+    expect(cfg.projects["app"]!.worker?.agentProfile).toBe("codex-coder");
     expect(cfg.projects["app"]!.orchestrator).toEqual({ identity: "dependabot[bot]", githubUser: "dependabot[bot]" });
   });
 
@@ -292,6 +319,13 @@ describe("identity profiles", () => {
     ).toThrow(/githubUser "neo-automaton" matches several identities \(neo, neo2\)/);
   });
 
+  it("rejects malformed agent profiles", () => {
+    expect(() => validateConfig({ agents: { "bad key": { plugin: "codex" } }, projects: {} })).toThrow();
+    expect(() => validateConfig({ agents: { codex1: {} }, projects: {} })).toThrow();
+    expect(() => validateConfig({ agents: { codex1: { plugin: "codex", permissions: "yolo" } }, projects: {} })).toThrow();
+    expect(() => validateConfig({ agents: { "codex.1": { plugin: "codex", sandbox: "read-only" } }, projects: {} })).not.toThrow();
+  });
+
   it("compares worker and reviewer by login, not by key", () => {
     expect(() =>
       validateConfig({
@@ -303,26 +337,5 @@ describe("identity profiles", () => {
         projects: { app: project() },
       }),
     ).toThrow(/worker and reviewer use the same githubUser "neo-automaton"/);
-  });
-});
-
-describe("mergeConfigValues", () => {
-  it("merges nested objects, replaces arrays and primitives, skips undefined", () => {
-    expect(
-      mergeConfigValues(
-        { a: 1, b: { c: 1, d: [1] }, e: [1, 2] },
-        { a: undefined, b: { d: [2] }, e: [3] } as never,
-      ),
-    ).toEqual({ a: 1, b: { c: 1, d: [2] }, e: [3] });
-    expect(mergeConfigValues(undefined, { x: 1 })).toEqual({ x: 1 });
-    expect(mergeConfigValues({ x: 1 }, undefined)).toEqual({ x: 1 });
-    expect(mergeConfigValues(undefined, undefined)).toBeUndefined();
-  });
-
-  it("returns copies, never the inputs", () => {
-    const base = { list: [1] };
-    const out = mergeConfigValues(base, undefined)!;
-    out.list.push(2);
-    expect(base.list).toEqual([1]);
   });
 });

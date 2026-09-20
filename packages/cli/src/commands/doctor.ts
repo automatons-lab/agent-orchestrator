@@ -86,6 +86,10 @@ function collectPluginReferences(config: OrchestratorConfig): PluginReference[] 
   addPluginReference(refs, "runtime", config.defaults.runtime, "defaults.runtime");
   addPluginReference(refs, "agent", config.defaults.agent, "defaults.agent");
   addPluginReference(refs, "workspace", config.defaults.workspace, "defaults.workspace");
+  // Fork: every agent profile must name a real agent plugin.
+  for (const [key, profile] of Object.entries(config.agents ?? {})) {
+    addPluginReference(refs, "agent", profile.plugin, `agents.${key}.plugin`);
+  }
   addPluginReference(
     refs,
     "agent",

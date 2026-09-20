@@ -24,9 +24,6 @@ const GIT_IDENTITY_STEP = /^\s*git\s+config\s+(--global\s+|--local\s+)?user\.(na
 
 const ROLE_KEYS = ["worker", "orchestrator", "reviewer"] as const;
 type RoleKey = (typeof ROLE_KEYS)[number];
-/** Role fields an identity can carry (`agent` is top-level, the rest live under `agentConfig`). */
-const IDENTITY_AGENT_CONFIG_FIELDS = ["model", "reasoningEffort", "permissions"] as const;
-type IdentityField = "agent" | (typeof IDENTITY_AGENT_CONFIG_FIELDS)[number];
 
 function isObj(v: unknown): v is Obj {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -93,8 +90,8 @@ export interface NormalizeOptions {
   /** Drop `git config user.*` postCreate steps when the worker has an identity. Default true. */
   dropGitIdentitySteps?: boolean;
   /**
-   * Rewrite `githubUser: <login>` references to `identity: <key>` and move
-   * agent settings shared by every role block of an identity into it. Default true.
+   * Rewrite `githubUser: <login>` references to `identity: <key>` and point
+   * identities at the declared `agents:` profile their role blocks repeat. Default true.
    */
   identityProfiles?: boolean;
 }
@@ -115,36 +112,13 @@ function identityKeyFor(identities: Obj, ref: string): string | undefined {
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-function ownField(block: Obj, field: IdentityField): unknown {
-  if (field === "agent") return block["agent"];
-  const agentConfig = block["agentConfig"];
-  return isObj(agentConfig) ? agentConfig[field] : undefined;
-}
-
-function deleteField(block: Obj, field: IdentityField): void {
-  if (field === "agent") {
-    delete block["agent"];
-    return;
-  }
-  const agentConfig = block["agentConfig"];
-  if (!isObj(agentConfig)) return;
-  delete agentConfig[field];
-  if (Object.keys(agentConfig).length === 0) delete block["agentConfig"];
-}
-
-function fieldPath(field: IdentityField): string {
-  return field === "agent" ? "agent" : `agentConfig.${field}`;
-}
-
 /**
- * Identity profiles. Step 1 rewrites every `githubUser: <login>` reference on
- * role and scm blocks to `identity: <key>`. Step 2 moves `agent`,
- * `agentConfig.model`, `.reasoningEffort` and `.permissions` into an identity
- * when every role block that effectively uses that identity agrees on the
- * value (a project block inherits the defaults block of its role) and no
- * project block of the same role relies on that defaults value while using a
- * different identity. Effective behaviour is therefore unchanged; the command
- * verifies that with `diffEffectiveProjects`.
+ * Identity and agent profiles. Step 1 rewrites every `githubUser: <login>`
+ * reference on role and scm blocks to `identity: <key>`. Step 2 points each
+ * identity at the declared `agents:` profile that matches the agent settings
+ * of every role block using it and removes the now duplicated `agent` /
+ * `agentConfig` fields. Effective behaviour is unchanged; the command verifies
+ * that with `diffEffectiveProjects`.
  */
 function applyIdentityProfiles(doc: Obj, defaults: Obj, projects: Record<string, Obj>, changes: string[]): void {
   const identities = doc["identities"];
@@ -178,50 +152,119 @@ function applyIdentityProfiles(doc: Obj, defaults: Obj, projects: Record<string,
     changes.push(`${where}: githubUser ${login} → identity ${key}`);
   }
 
-  // Step 2: per identity and role, every project is a user when its own block
-  // (or, lacking one, the defaults block of that role) names the identity. A
-  // project without its own value inherits the defaults block's value only
-  // when that block names the same identity; otherwise the value belongs to
-  // another identity's defaults and must stay where it is.
+  // Step 2: wire identities to declared agent profiles. For every identity
+  // and role, every project is a user when its own block (or, lacking one,
+  // the defaults block of that role) names the identity. When one declared
+  // profile matches the effective agent settings of every user in every role
+  // (plugin equal, each profile key equal; extra agentConfig keys stay as
+  // overrides), the identity gets `agent: <profile>` and the duplicated fields
+  // leave the blocks. A value inherited from the defaults block counts only
+  // when that block names the same identity; removing a field from defaults
+  // must not change a project that runs as another identity but inherits it.
+  const agents = doc["agents"];
+  if (!isObj(agents)) return;
+  const profileKeys = (profile: Obj): string[] => Object.keys(profile).filter((k) => k !== "plugin");
+  // A block's own agentConfig keys stay as overrides whatever the profile says;
+  // keys it inherits must equal the profile's value or the behaviour would change.
+  const profileMatches = (profile: Obj, e: { plugin: unknown; ownConfig: Obj; inheritedConfig: Obj }): boolean =>
+    profile["plugin"] === e.plugin &&
+    profileKeys(profile).every((k) => e.ownConfig[k] !== undefined || deepEqual(e.inheritedConfig[k], profile[k]));
   for (const key of Object.keys(identities)) {
     const entry = identities[key];
     if (!isObj(entry)) continue;
+    const identityAgent = entry["agent"];
+    if (identityAgent !== undefined && !isObj(agents[String(identityAgent)])) continue; // bare plugin: leave alone
+    let candidates: string[] | undefined = identityAgent !== undefined ? [String(identityAgent)] : undefined;
+    interface Source {
+      where: string;
+      block: Obj;
+      inheritsAgent: boolean;
+      inheritedConfigKeys: Set<string>;
+    }
+    const sources: Source[] = [];
+    let usable = true;
     for (const role of ROLE_KEYS) {
       const defaultsBlock = isObj(defaults[role]) ? (defaults[role] as Obj) : undefined;
       const defaultsNamesKey = defaultsBlock?.["identity"] === key;
+      const defaultsAgent = defaultsNamesKey && defaultsBlock ? defaultsBlock["agent"] : undefined;
+      const defaultsConfig = defaultsNamesKey && defaultsBlock && isObj(defaultsBlock["agentConfig"]) ? (defaultsBlock["agentConfig"] as Obj) : {};
       const projectBlocks = Object.entries(projects)
         .filter(([, project]) => isObj(project))
         .map(([id, project]) => ({ id, block: isObj(project[role]) ? (project[role] as Obj) : undefined }));
       const users = projectBlocks.filter(({ block }) => (block?.["identity"] ?? defaultsBlock?.["identity"]) === key);
       const others = projectBlocks.filter(({ block }) => (block?.["identity"] ?? defaultsBlock?.["identity"]) !== key);
       if (users.length === 0 && !defaultsNamesKey) continue;
-      for (const field of ["agent", ...IDENTITY_AGENT_CONFIG_FIELDS] as IdentityField[]) {
-        const defaultsValue = defaultsNamesKey && defaultsBlock ? ownField(defaultsBlock, field) : undefined;
-        const values =
-          users.length > 0
-            ? users.map(({ block }) => (block ? (ownField(block, field) ?? defaultsValue) : defaultsValue))
-            : [defaultsValue];
-        const value = values[0];
-        if (value === undefined || !values.every((v) => deepEqual(v, value))) continue;
-        if (defaultsValue !== undefined && !deepEqual(defaultsValue, value)) continue;
-        if (entry[field] !== undefined && !deepEqual(entry[field], value)) continue;
-        // Removing the value from the defaults block must not change a project
-        // that runs as another identity but inherits this field from it.
-        if (defaultsValue !== undefined && others.some(({ block }) => !block || ownField(block, field) === undefined)) continue;
-        const sources: Array<{ where: string; block: Obj }> = [];
-        if (defaultsValue !== undefined && defaultsBlock) sources.push({ where: `defaults.${role}`, block: defaultsBlock });
-        for (const { id, block } of users) {
-          if (block && ownField(block, field) !== undefined) sources.push({ where: `projects.${id}.${role}`, block });
+      const effectives = (users.length > 0 ? users : [{ block: undefined }]).map(({ block }) => {
+        const ownAgent = block?.["agent"];
+        if (ownAgent !== undefined && isObj(agents[String(ownAgent)])) return undefined; // already on a profile
+        const ownConfig = block && isObj(block["agentConfig"]) ? (block["agentConfig"] as Obj) : {};
+        return { plugin: ownAgent ?? defaultsAgent, ownConfig, inheritedConfig: defaultsConfig };
+      });
+      if (effectives.some((e) => e === undefined || e.plugin === undefined)) {
+        usable = false;
+        break;
+      }
+      const matching = Object.keys(agents).filter((name) => {
+        const profile = agents[name];
+        return isObj(profile) && effectives.every((e) => profileMatches(profile, e!));
+      });
+      candidates = candidates === undefined ? matching : candidates.filter((c) => matching.includes(c));
+      if (candidates.length === 0) {
+        usable = false;
+        break;
+      }
+      // Fields the defaults block would lose must not be inherited by other-identity projects.
+      if (defaultsNamesKey && defaultsBlock) {
+        const inheritedByOthers = (field: string, inConfig: boolean): boolean =>
+          others.some(({ block }) => {
+            if (!block) return true;
+            if (!inConfig) return block["agent"] === undefined;
+            return !(isObj(block["agentConfig"]) && (block["agentConfig"] as Obj)[field] !== undefined);
+          });
+        const lost = [
+          ...(defaultsAgent !== undefined && inheritedByOthers("agent", false) ? ["agent"] : []),
+          ...Object.keys(defaultsConfig).filter((k) => inheritedByOthers(k, true)),
+        ];
+        if (lost.length > 0) {
+          usable = false;
+          break;
         }
-        if (entry[field] === undefined) {
-          entry[field] = clone(value);
-          changes.push(`identities.${key}.${field}: hoisted from ${sources.map((s) => s.where).join(", ")}`);
-        }
-        for (const source of sources) {
-          deleteField(source.block, field);
-          changes.push(`${source.where}.${fieldPath(field)}: removed (identity ${key} provides it)`);
+        sources.push({ where: `defaults.${role}`, block: defaultsBlock, inheritsAgent: false, inheritedConfigKeys: new Set() });
+      }
+      for (const { id, block } of users) {
+        if (!block) continue;
+        sources.push({
+          where: `projects.${id}.${role}`,
+          block,
+          inheritsAgent: block["agent"] === undefined,
+          inheritedConfigKeys: new Set(Object.keys(defaultsConfig)),
+        });
+      }
+    }
+    if (!usable || candidates === undefined || candidates.length === 0 || sources.length === 0) continue;
+    const best = [...candidates].sort((a, b) => {
+      const diff = profileKeys(agents[b] as Obj).length - profileKeys(agents[a] as Obj).length;
+      return diff !== 0 ? diff : a.localeCompare(b);
+    })[0]!;
+    const profile = agents[best] as Obj;
+    if (entry["agent"] === undefined) {
+      entry["agent"] = best;
+      changes.push(`identities.${key}.agent: → ${best} (matches agents.${best})`);
+    }
+    for (const source of sources) {
+      if (!source.inheritsAgent && source.block["agent"] === profile["plugin"]) {
+        delete source.block["agent"];
+        changes.push(`${source.where}.agent: removed (agents.${best} provides it)`);
+      }
+      const agentConfig = source.block["agentConfig"];
+      if (!isObj(agentConfig)) continue;
+      for (const k of profileKeys(profile)) {
+        if (agentConfig[k] !== undefined && deepEqual(agentConfig[k], profile[k])) {
+          delete agentConfig[k];
+          changes.push(`${source.where}.agentConfig.${k}: removed (agents.${best} provides it)`);
         }
       }
+      if (Object.keys(agentConfig).length === 0) delete source.block["agentConfig"];
     }
   }
 }
@@ -339,6 +382,13 @@ export function normalizeConfigDocument(raw: Obj, options: NormalizeOptions = {}
   return { normalized: doc, changes };
 }
 
+/** Fields validation derives (`agentProfile`) are bookkeeping, not behaviour. */
+function withoutDerived(value: unknown): unknown {
+  if (!isObj(value)) return value;
+  const { agentProfile: _ignored, ...rest } = value;
+  return rest;
+}
+
 export interface EffectiveDiffEntry {
   project: string;
   key: string;
@@ -360,8 +410,8 @@ export function diffEffectiveProjects(before: Obj, after: Obj): EffectiveDiffEnt
     const pa = a.projects[id] as unknown as Obj | undefined;
     const pb = b.projects[id] as unknown as Obj | undefined;
     for (const key of DEFAULTABLE_PROJECT_KEYS) {
-      const va = pa?.[key];
-      const vb = pb?.[key];
+      const va = withoutDerived(pa?.[key]);
+      const vb = withoutDerived(pb?.[key]);
       if (!deepEqual(va, vb)) out.push({ project: id, key, before: va, after: vb });
     }
   }

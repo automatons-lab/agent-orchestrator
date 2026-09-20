@@ -2,7 +2,7 @@
  * Identities (fork).
  *
  * `identities:` maps an id to a GitHub login, the environment variable that
- * holds its token and the agent settings it runs with. Roles (`worker`,
+ * holds its token and the agent profile it runs with. Roles (`worker`,
  * `orchestrator`, `reviewer`) and the engine's own SCM calls (`scm.identity`)
  * reference an identity by key; config validation also resolves the legacy
  * `githubUser: <login>` form. Tokens are read from the environment at use
@@ -28,11 +28,8 @@ export interface ResolvedIdentity {
   name: string;
   /** Git author email (defaults to the GitHub noreply address). */
   email: string;
-  /** Agent settings the identity carries, if any. */
+  /** Agent reference (key of `agents:` or plugin name) the identity carries, if any. */
   agent?: string;
-  model?: string;
-  reasoningEffort?: string;
-  permissions?: string;
 }
 
 type IdentityConfigSource = Pick<OrchestratorConfig, "identities">;
@@ -66,9 +63,6 @@ export function resolveIdentity(
     name: entry.name ?? login,
     email: entry.email ?? `${login}@users.noreply.github.com`,
     ...(entry.agent !== undefined ? { agent: entry.agent } : {}),
-    ...(entry.model !== undefined ? { model: entry.model } : {}),
-    ...(entry.reasoningEffort !== undefined ? { reasoningEffort: entry.reasoningEffort } : {}),
-    ...(entry.permissions !== undefined ? { permissions: entry.permissions } : {}),
   };
 }
 
