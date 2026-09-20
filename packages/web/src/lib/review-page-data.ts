@@ -166,6 +166,7 @@ export async function getReviewPageData(project?: string): Promise<ReviewPageDat
             workerActivity: worker?.activity ?? null,
             workerRuntimeState: worker?.lifecycle.runtime.state ?? null,
             workerHasRuntime: worker?.runtimeHandle !== null && worker?.runtimeHandle !== undefined,
+            workerIsTerminal: worker ? isTerminalSession(worker) : true,
           };
         }),
       );

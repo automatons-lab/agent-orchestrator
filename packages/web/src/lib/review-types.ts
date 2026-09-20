@@ -23,6 +23,19 @@ export interface DashboardReviewRun extends CodeReviewRunSummary {
   workerActivity: string | null;
   workerRuntimeState: string | null;
   workerHasRuntime: boolean;
+  /** Worker session is merged, closed, killed or otherwise done (or no longer exists). */
+  workerIsTerminal: boolean;
+}
+
+const REVIEW_ACTIVE_RUN_STATUSES = new Set<DashboardReviewRun["status"]>(["queued", "preparing", "running"]);
+
+/**
+ * A finished run belongs to a worker session that reached a terminal state
+ * (merged, closed, killed…) or that no longer exists, and is not itself still
+ * executing. The board hides finished runs unless the viewer asks for them.
+ */
+export function isFinishedReviewRun(run: Pick<DashboardReviewRun, "status" | "workerIsTerminal">): boolean {
+  return run.workerIsTerminal && !REVIEW_ACTIVE_RUN_STATUSES.has(run.status);
 }
 
 export interface ReviewWorkerOption {

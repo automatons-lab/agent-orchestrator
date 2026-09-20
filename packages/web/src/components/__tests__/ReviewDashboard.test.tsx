@@ -37,6 +37,7 @@ function makeRun(overrides: Partial<DashboardReviewRun>): DashboardReviewRun {
     workerActivity: "idle",
     workerRuntimeState: "alive",
     workerHasRuntime: true,
+    workerIsTerminal: false,
     ...overrides,
   };
 }
@@ -229,4 +230,36 @@ describe("ReviewDashboard", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Review completed clean")).not.toBeInTheDocument();
   });
+
+  it("hides runs of finished worker sessions until asked", () => {
+    render(
+      <ReviewDashboard
+        runs={[
+          makeRun({ status: "needs_triage" }),
+          makeRun({
+            id: "review-run-3",
+            reviewerSessionId: "app-rev-3",
+            linkedSessionId: "app-3",
+            status: "clean",
+            workerTitle: "Merged work",
+            workerStatus: "merged",
+            workerIsTerminal: true,
+            findingCount: 0,
+            openFindingCount: 0,
+            dismissedFindingCount: 0,
+          }),
+        ]}
+        projectId="my-app"
+        projectName="My App"
+        projects={[{ id: "my-app", name: "My App", path: "/tmp/my-app" }]}
+      />,
+    );
+
+    expect(screen.getByText("Add todo filters")).toBeInTheDocument();
+    expect(screen.queryByText("Merged work")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show finished (1)" }));
+    expect(screen.getByText("Merged work")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide finished (1)" })).toBeInTheDocument();
+  });
+
 });

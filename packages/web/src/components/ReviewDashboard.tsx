@@ -11,6 +11,7 @@ import {
   getReviewBoardColumn,
   hasNativeReviewDetails,
   REVIEW_BOARD_COLUMNS,
+  isFinishedReviewRun,
   REVIEW_COLUMN_LABELS,
   type DashboardReviewRun,
   type ReviewWorkerOption,
@@ -159,6 +160,7 @@ function ReviewDashboardInner({
   const [sendingRunIds, setSendingRunIds] = useState<Set<string>>(() => new Set());
   const [restoringOrchestratorId, setRestoringOrchestratorId] = useState<string | null>(null);
   const [newReviewMenuOpen, setNewReviewMenuOpen] = useState(false);
+  const [showFinished, setShowFinished] = useState(false);
   const [reviewDetails, setReviewDetails] = useState<ReviewDetailsState | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -203,6 +205,11 @@ function ReviewDashboardInner({
     return () => document.removeEventListener("keydown", handleKey);
   }, [reviewDetails]);
 
+  const finishedRunCount = useMemo(() => reviewRuns.filter(isFinishedReviewRun).length, [reviewRuns]);
+  const visibleRuns = useMemo(
+    () => (showFinished ? reviewRuns : reviewRuns.filter((run) => !isFinishedReviewRun(run))),
+    [reviewRuns, showFinished],
+  );
   const grouped = useMemo(() => {
     const columns: Record<ReviewBoardColumn, DashboardReviewRun[]> = {
       queued: [],
@@ -213,11 +220,11 @@ function ReviewDashboardInner({
       failed: [],
       outdated: [],
     };
-    for (const run of reviewRuns) {
+    for (const run of visibleRuns) {
       columns[getReviewBoardColumn(run)].push(run);
     }
     return columns;
-  }, [reviewRuns]);
+  }, [visibleRuns]);
 
   const allProjectsView = !projectId;
   const openFindingCount = reviewRuns.reduce((sum, run) => sum + run.openFindingCount, 0);
@@ -709,12 +716,31 @@ function ReviewDashboardInner({
               </div>
             ) : null}
 
-            {reviewRuns.length === 0 ? (
+            {finishedRunCount > 0 ? (
+              <div className="review-board-toolbar mb-4 flex flex-wrap items-center gap-3 text-[11px] text-[var(--color-text-muted)]">
+                <button
+                  type="button"
+                  className="dashboard-app-btn"
+                  aria-pressed={showFinished}
+                  onClick={() => setShowFinished((value) => !value)}
+                >
+                  {showFinished
+                    ? `Hide finished (${finishedRunCount})`
+                    : `Show finished (${finishedRunCount})`}
+                </button>
+                <span>Finished runs belong to merged, closed or exited worker sessions.</span>
+              </div>
+            ) : null}
+
+            {visibleRuns.length === 0 ? (
               <section className="review-empty-state">
-                <div className="review-empty-state__title">No review runs yet</div>
+                <div className="review-empty-state__title">
+                  {reviewRuns.length === 0 ? "No review runs yet" : "No open review runs"}
+                </div>
                 <p className="review-empty-state__body">
-                  Reviewer runs will appear here after a worker is ready for review or after a
-                  manual review is requested.
+                  {reviewRuns.length === 0
+                    ? "Reviewer runs will appear here after a worker is ready for review or after a manual review is requested."
+                    : `${pluralize(finishedRunCount, "finished run")} hidden. Use "Show finished" to see them.`}
                 </p>
                 <Link
                   href={projectId ? projectDashboardPath(projectId) : "/?project=all"}
