@@ -600,6 +600,18 @@ export function countsAsReviewRound(run: CodeReviewRun): boolean {
   return NATIVE_ACTIVE_RUN_STATUSES.has(run.status) || run.verdict !== undefined;
 }
 
+/** Destroy a leftover pane named like the reviewer session; returns whether one existed. */
+export async function destroyStalePane(runtime: Runtime, tmuxName: string): Promise<boolean> {
+  const handle: RuntimeHandle = { id: tmuxName, runtimeName: runtime.name, data: {} };
+  try {
+    if (!(await runtime.isAlive(handle))) return false;
+    await runtime.destroy(handle);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function reviewRoundFor(store: CodeReviewStore, linkedSessionId: string): number {
   const prior = store.listRuns({ linkedSessionId }).filter(countsAsReviewRound);
   return prior.length; // includes the run being executed when called after createRun
@@ -788,6 +800,22 @@ export async function executeNativeReview(
     ...(reviewer.model ? { model: reviewer.model } : {}),
     ...(reviewer.reasoningEffort ? { reasoningEffort: reviewer.reasoningEffort } : {}),
     ...(reviewer.sandbox ? { sandbox: reviewer.sandbox } : {}),
+  });
+  // A pane with the reviewer's name may survive from an earlier run (the
+  // release timer dies with the engine process); the dispatcher guarantees no
+  // other run of this PR is active, so anything found here is stale.
+  await destroyStalePane(deps.runtime, run.reviewerSessionId).then((destroyed) => {
+    if (destroyed) {
+      recordActivityEvent({
+        projectId,
+        sessionId: session.id,
+        source: "review",
+        kind: "review.native_stale_pane_destroyed",
+        level: "info",
+        summary: `native review ${run.id}: destroyed stale pane ${run.reviewerSessionId}`,
+        data: { runId: run.id, tmuxName: run.reviewerSessionId },
+      });
+    }
   });
   let handle: RuntimeHandle;
   try {

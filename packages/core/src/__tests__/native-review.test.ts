@@ -255,6 +255,8 @@ function makeHarness(opts: {
   env?: NodeJS.ProcessEnv;
   submitError?: Error;
   neverExit?: boolean;
+  /** Pre-seed a live pane named like the reviewer session (left over from an earlier run). */
+  stalePane?: boolean;
 }) {
   const root = mkdtempSync(join(tmpdir(), "ao-native-review-"));
   const storeDir = join(root, "store");
@@ -288,10 +290,12 @@ function makeHarness(opts: {
   };
   const created: Array<{ launchCommand: string; environment: Record<string, string> }> = [];
   let destroyed = 0;
+  const alive = new Set<string>();
   const runtime: Runtime = {
     name: "tmux",
     async create(cfg: RuntimeCreateConfig) {
       created.push({ launchCommand: cfg.launchCommand, environment: cfg.environment });
+      alive.add(cfg.sessionId);
       if (!opts.neverExit) {
         const dir = join(cfg.workspacePath, ".ao-review");
         if (opts.agentOutput !== null) {
@@ -301,15 +305,16 @@ function makeHarness(opts: {
       }
       return { id: cfg.sessionId, runtimeName: "tmux", data: {} } as RuntimeHandle;
     },
-    async destroy() {
+    async destroy(handle: RuntimeHandle) {
       destroyed += 1;
+      alive.delete(handle.id);
     },
     async sendMessage() {},
     async getOutput() {
       return "codex: boom";
     },
-    async isAlive() {
-      return true;
+    async isAlive(handle: RuntimeHandle) {
+      return alive.has(handle.id);
     },
   } as unknown as Runtime;
   const submitted: unknown[] = [];
@@ -371,6 +376,7 @@ function makeHarness(opts: {
       destroyed += 100;
     },
   };
+  if (opts.stalePane) alive.add(run.reviewerSessionId);
   return { root, store, run, deps, workspacePath, gitCalls, created, submitted, destroyedRef: () => destroyed, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -551,4 +557,17 @@ describe("review round counting", () => {
     } as unknown as Parameters<typeof reviewRoundFor>[0];
     expect(reviewRoundFor(store, "s1")).toBe(2);
   });
+
+  it("destroys a stale pane with the reviewer's name before launching the new one", async () => {
+    const h = makeHarness({ stalePane: true });
+    try {
+      const result = await executeNativeReview(h.deps, h.run);
+      expect(result.run.status).not.toBe("failed");
+      expect(h.created).toHaveLength(1);
+      expect(h.destroyedRef()).toBe(101); // 1 stale pane destroyed + the new pane released (100)
+    } finally {
+      h.cleanup();
+    }
+  });
+
 });
