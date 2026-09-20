@@ -939,27 +939,6 @@ function ReviewCard({
           </svg>
           details
         </button>
-        {run.reviewerTmuxAlive && run.tmuxName ? (
-          <button
-            type="button"
-            className="session-card__control session-card__terminal-link"
-            title={`Attach to the reviewer pane ${run.tmuxName}`}
-            onClick={() => onOpenDetails(run)}
-          >
-            <svg
-              className="session-card__control-icon"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
-              <path d="M4 17l6-5-6-5" />
-              <path d="M12 19h8" />
-            </svg>
-            terminal
-          </button>
-        ) : null}
       </div>
 
       <div className="session-card__body flex min-h-0 flex-1 flex-col">

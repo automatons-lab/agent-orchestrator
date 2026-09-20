@@ -270,7 +270,7 @@ describe("ReviewDashboard", () => {
   });
 
 
-  it("offers a terminal button while the reviewer pane is alive and attaches to it in the details panel", async () => {
+  it("attaches to the live reviewer pane inside the details panel, without a separate terminal button", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -298,8 +298,8 @@ describe("ReviewDashboard", () => {
       />,
     );
 
-    expect(screen.getAllByRole("button", { name: /^terminal$/i })).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: /^terminal$/i }));
+    expect(screen.queryByRole("button", { name: /^terminal$/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /^details$/i })[0]!);
     expect(await screen.findByTestId("reviewer-terminal")).toHaveTextContent("app-rev-1");
     expect(screen.getByRole("dialog")).toHaveClass("review-detail-panel--with-terminal");
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
