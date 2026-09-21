@@ -1,6 +1,6 @@
 {
   "name": "@aoagents/ao-plugin-workspace-clone",
-  "version": "0.9.1",
+  "version": "0.9.3-nightly-610b7cb1a2afebd5d703ea7959c46ddda8d02003",
   "description": "Workspace plugin: git clone",
   "license": "MIT",
   "type": "module",
