@@ -532,6 +532,7 @@ export type {
 } from "./migration/storage-v2.js";
 
 export { atomicWriteFileSync } from "./atomic-write.js";
+export { updateSharedConfigFileSync } from "./shared-config-file.js";
 
 export {
   registerWindowsPtyHost,

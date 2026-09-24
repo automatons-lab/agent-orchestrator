@@ -32,6 +32,7 @@ import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import { trustCodexWorkspace } from "./workspace-trust.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -955,6 +956,17 @@ function createCodexAgent(): Agent {
       parts.push(shellEscape(threadId));
 
       return formatLaunchCommand(parts);
+    },
+
+    async preLaunchSetup(workspacePath: string): Promise<void> {
+      // Best effort: without the entry Codex only asks its trust question.
+      try {
+        trustCodexWorkspace(workspacePath);
+      } catch (err) {
+        console.warn(
+          `[codex] could not trust ${workspacePath} in the Codex config: ${String(err)}`,
+        );
+      }
     },
 
     async setupWorkspaceHooks(

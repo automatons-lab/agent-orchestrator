@@ -29,6 +29,7 @@ import {
   resolveWorkspaceForClaude,
   toClaudeProjectPath,
 } from "./activity-detection.js";
+import { trustClaudeWorkspace } from "./workspace-trust.js";
 
 export { resetPsCache, resolveWorkspaceForClaude, toClaudeProjectPath } from "./activity-detection.js";
 
@@ -1278,6 +1279,17 @@ function createClaudeCodeAgent(): Agent {
       appendEffortFlag(parts, project.agentConfig?.["reasoningEffort"]);
 
       return parts.join(" ");
+    },
+
+    async preLaunchSetup(workspacePath: string): Promise<void> {
+      // Best effort: without the entry Claude Code only asks its trust question.
+      try {
+        trustClaudeWorkspace(workspacePath);
+      } catch (err) {
+        console.warn(
+          `[claude-code] could not trust ${workspacePath} in ~/.claude.json: ${String(err)}`,
+        );
+      }
     },
 
     async setupWorkspaceHooks(workspacePath: string, _config: WorkspaceHooksConfig): Promise<void> {

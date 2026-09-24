@@ -31,10 +31,11 @@ function renameWithRetry(src: string, dest: string): void {
 /**
  * Atomically write a file by writing to a temp file then renaming.
  * rename() is atomic on POSIX, so concurrent writers never produce torn data.
+ * `mode` sets the permission bits of the new file (subject to the umask).
  */
-export function atomicWriteFileSync(filePath: string, content: string): void {
+export function atomicWriteFileSync(filePath: string, content: string, mode?: number): void {
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmpPath, content, "utf-8");
+  writeFileSync(tmpPath, content, mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
   try {
     renameWithRetry(tmpPath, filePath);
   } catch (err) {
