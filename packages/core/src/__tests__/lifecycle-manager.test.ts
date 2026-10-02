@@ -3734,21 +3734,33 @@ describe("pollAll terminal status accounting", () => {
     vi.useRealTimers();
   });
 
-  it("treats canonically finalized sessions as inactive for all-complete", async () => {
+  it("treats all TERMINAL_STATUSES as inactive for all-complete", async () => {
     const notifier = createMockNotifier();
+    const scm = createMockSCM({ getPRState: vi.fn().mockResolvedValue("merged") });
     const registryWithNotifier: PluginRegistry = {
       ...mockRegistry,
       get: vi.fn().mockImplementation((slot: string, name: string) => {
         if (slot === "runtime") return plugins.runtime;
         if (slot === "agent") return plugins.agent;
+        if (slot === "scm") return scm;
         if (slot === "notifier" && name === "desktop") return notifier;
         return null;
       }),
     };
 
-    // Merged PRs can still need reconciliation; only finalized sessions belong here.
+    // Merged sessions now reconcile even though their legacy status counts as
+    // complete. Supply actual PR evidence and metadata for that polling path.
+    const mergedSession = makeSession({ id: "s-2", status: "merged", pr: makeMatchingPR() });
+    writeMetadata(env.sessionsDir, mergedSession.id, {
+      project: "my-app",
+      worktree: env.tmpDir,
+      branch: "feat/test",
+      status: "merged",
+      pr: mergedSession.pr?.url,
+    });
     const terminalSessions = [
       makeSession({ id: "s-1", status: "killed" as SessionStatus }),
+      mergedSession,
       makeSession({ id: "s-3", status: "done" as SessionStatus }),
       makeSession({ id: "s-4", status: "errored" as SessionStatus }),
       makeSession({ id: "s-5", status: "terminated" as SessionStatus }),
@@ -3773,8 +3785,13 @@ describe("pollAll terminal status accounting", () => {
     // Let the immediate pollAll() run
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(mergedSession.status).toBe("merged");
+    expect(mergedSession.lifecycle.session.state).toBe("idle");
     expect(notifier.notify).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "reaction.triggered" }),
+      expect.objectContaining({
+        type: "reaction.triggered",
+        data: expect.objectContaining({ reaction: expect.objectContaining({ key: "all-complete" }) }),
+      }),
     );
 
     lm.stop();
