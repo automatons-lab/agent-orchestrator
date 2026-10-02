@@ -11,6 +11,7 @@ import {
   isDashboardSessionDone,
   isDashboardSessionTerminal,
   isDashboardSessionRestorable,
+  isReviewOnlySession,
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { getSessionTitle } from "@/lib/format";
@@ -144,6 +145,9 @@ function SessionCardView({ session, onKill, onMerge, onRestore }: SessionCardPro
     <div className={cn("session-card border", !hasEntered && "kanban-card-enter")}>
       <div className="session-card__header">
         <StatusBadge session={session} />
+        {isReviewOnlySession(session) ? (
+          <span className="text-[10px] text-[var(--color-text-tertiary)]">Review only</span>
+        ) : null}
         <div className="flex-1" />
         <span className="card__id">{session.id}</span>
         {isRestorable && (
@@ -169,7 +173,7 @@ function SessionCardView({ session, onKill, onMerge, onRestore }: SessionCardPro
             restore
           </button>
         )}
-        {!isTerminal && (
+        {!isTerminal && !isReviewOnlySession(session) && (
           <a
             href={projectSessionHashPath(
               session.projectId,

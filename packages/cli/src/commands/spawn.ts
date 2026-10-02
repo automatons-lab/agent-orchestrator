@@ -24,7 +24,7 @@ import { projectSessionUrl } from "../lib/routes.js";
  * - If multiple projects exist, match cwd against project paths.
  * - Falls back to AO_PROJECT_ID env var (set when called from an agent session).
  */
-function autoDetectProject(config: OrchestratorConfig): string {
+export function autoDetectProject(config: OrchestratorConfig): string {
   const projectIds = Object.keys(config.projects);
   if (projectIds.length === 0) {
     throw new Error("No projects configured. Run 'ao start' first.");
@@ -112,7 +112,7 @@ interface SpawnClaimOptions {
  * worse failure mode than creating no session at all — so fail fast with
  * an actionable error.
  */
-async function ensureAOPollingProject(projectId: string): Promise<void> {
+export async function ensureAOPollingProject(projectId: string): Promise<void> {
   const running = await getRunning();
   if (!running) {
     throw new Error(

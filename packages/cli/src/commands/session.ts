@@ -22,7 +22,7 @@ interface SessionListEntry {
   id: string;
   projectId: string;
   projectName: string;
-  role: "worker" | "orchestrator";
+  role: "worker" | "orchestrator" | "review-only";
   branch: string | null;
   status: string | null;
   issueId: string | null;
@@ -122,6 +122,7 @@ export function registerSession(program: Command): void {
 
         const activities = await Promise.all(
           projectSessions.map((s) => {
+            if (s.lifecycle.session.kind === "review-only") return Promise.resolve(null);
             // On Windows, use enriched session lastActivityAt (no tmux available).
             if (isWindows()) {
               return Promise.resolve(s.lastActivityAt ? s.lastActivityAt.getTime() : null);
@@ -141,13 +142,12 @@ export function registerSession(program: Command): void {
           const prUrl = s.metadata["pr"] ?? null;
 
           if (opts.json) {
-            const role = isOrchestratorSession(
-              s,
-              project.sessionPrefix ?? projectId,
-              allSessionPrefixes,
-            )
-              ? "orchestrator"
-              : "worker";
+            const role =
+              s.lifecycle.session.kind === "review-only"
+                ? "review-only"
+                : isOrchestratorSession(s, project.sessionPrefix ?? projectId, allSessionPrefixes)
+                  ? "orchestrator"
+                  : "worker";
 
             jsonOutput.push({
               id: s.id,
@@ -167,6 +167,7 @@ export function registerSession(program: Command): void {
 
           const age = activityTs ? formatAge(activityTs) : "-";
           const parts = [chalk.green(s.id), chalk.dim(`(${age})`)];
+          if (s.lifecycle.session.kind === "review-only") parts.push(chalk.dim("[review-only]"));
           if (branchStr) parts.push(chalk.cyan(branchStr));
           if (s.status) parts.push(chalk.dim(`[${s.status}]`));
           if (prUrl) parts.push(chalk.blue(prUrl));

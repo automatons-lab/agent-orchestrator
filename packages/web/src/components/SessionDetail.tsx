@@ -7,6 +7,7 @@ import {
   type DashboardSession,
   isDashboardSessionRestorable,
   isDashboardSessionTerminal,
+  isReviewOnlySession,
 } from "@/lib/types";
 import dynamic from "next/dynamic";
 import { getSessionTitle } from "@/lib/format";
@@ -17,6 +18,7 @@ import { projectDashboardPath, projectSessionPath } from "@/lib/routes";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { SessionDetailHeader, type OrchestratorZones } from "./SessionDetailHeader";
 import { SessionEndedSummary } from "./SessionEndedSummary";
+import { SessionDetailPRCard } from "./SessionDetailPRCard";
 import { SessionInspector } from "./SessionInspector";
 
 export type { OrchestratorZones } from "./SessionDetailHeader";
@@ -58,6 +60,7 @@ export function SessionDetail({
   const prs = session.prs ?? [];
   const safeSelectedPRIndex = Math.min(selectedPRIndex, Math.max(0, prs.length - 1));
   const pr = prs[safeSelectedPRIndex] ?? session.pr;
+  const reviewOnly = isReviewOnlySession(session);
   const terminalEnded = isDashboardSessionTerminal(session);
   const isRestorable = isDashboardSessionRestorable(session);
   const headline = getSessionTitle(session);
@@ -144,7 +147,21 @@ export function SessionDetail({
       />
       <main className="session-detail-page session-workspace flex-1 min-h-0 flex bg-[var(--color-bg-base)]">
         <div className="session-workspace__main flex-1 min-h-0 flex flex-col">
-          {!showTerminal ? (
+          {reviewOnly ? (
+            <section aria-label="Review-only session" className="overflow-auto p-6">
+              <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
+                This session tracks an existing pull request for native review. Review results
+                appear on the pull request and in the review board.
+              </p>
+              {pr ? (
+                <SessionDetailPRCard
+                  pr={pr}
+                  metadata={session.metadata}
+                  lifecyclePrReason={session.lifecycle?.prReason ?? undefined}
+                />
+              ) : null}
+            </section>
+          ) : !showTerminal ? (
             <div className="session-detail-terminal-placeholder h-full" />
           ) : terminalEnded ? (
             <SessionEndedSummary
@@ -172,7 +189,7 @@ export function SessionDetail({
         </div>
         {/* The orchestrator session has no PR/changes/browser to inspect — give
             it the full-width terminal (no inspector rail). */}
-        {!isMobile && !terminalEnded && !isOrchestrator ? (
+        {!isMobile && !terminalEnded && !isOrchestrator && !reviewOnly ? (
           <SessionInspector session={session} />
         ) : null}
       </main>

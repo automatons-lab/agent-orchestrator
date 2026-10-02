@@ -5,6 +5,7 @@ import {
   createCodeReviewStore,
   executeCodeReviewRun,
   loadConfig,
+  resolveReviewerConfig,
   sendCodeReviewFindingsToAgent,
   SessionNotFoundError,
   triggerCodeReviewForSession,
@@ -13,6 +14,10 @@ import {
   type Runtime,
 } from "@aoagents/ao-core";
 import { getPluginRegistry, getSessionManager } from "../lib/create-session-manager.js";
+
+import { autoDetectProject, ensureAOPollingProject } from "./spawn.js";
+import { DEFAULT_PORT } from "../lib/constants.js";
+import { projectSessionUrl } from "../lib/routes.js";
 
 const RUN_STATUSES: ReadonlySet<CodeReviewRunStatus> = new Set([
   "queued",
@@ -127,7 +132,57 @@ function getNextQueuedRun(
 }
 
 export function registerReview(program: Command): void {
-  const review = program.command("review").description("Manage AO-local reviewer runs");
+  const review = program
+    .command("review")
+    .description("Review an existing PR or manage AO-local reviewer runs")
+    .usage("[pr] [options] | [command]")
+    .addHelpText(
+      "after",
+      "\nReview an existing PR: ao review <number-or-url> [-p, --project <id>] [--json]",
+    );
+
+  review
+    .command("track", { isDefault: true, hidden: true })
+    .description("Track an existing PR for native review without a coding worker")
+    .argument("[pr]", "Pull request number or URL to track without a coding worker")
+    .option("-p, --project <project>", "Project ID (auto-detected if omitted)")
+    .option("--json", "Output as JSON")
+    .action(async (prRef: string | undefined, opts: { project?: string; json?: boolean }) => {
+      if (!prRef) {
+        review.help();
+        return;
+      }
+      try {
+        const config = loadConfig();
+        const projectId = opts.project ?? autoDetectProject(config);
+        const project = config.projects[projectId];
+        if (!project) throw new Error(`Unknown project: ${projectId}`);
+        if (!resolveReviewerConfig(project, config.defaults)) {
+          throw new Error(
+            `Native reviewer is disabled for project "${projectId}". Set reviewer.enabled: true and reviewer.githubUser before running ao review.`,
+          );
+        }
+        await ensureAOPollingProject(projectId);
+        const sessionManager = await getSessionManager(config);
+        if (!sessionManager.review)
+          throw new Error("Session manager does not support review-only sessions.");
+        const session = await sessionManager.review(projectId, prRef);
+        if (opts.json) {
+          console.log(JSON.stringify({ session }, null, 2));
+          return;
+        }
+        console.log(chalk.green(`Review-only session ${session.id} registered.`));
+        if (session.pr) console.log(chalk.dim(`  PR:   ${session.pr.url}`));
+        console.log(
+          chalk.dim(
+            `  View: ${projectSessionUrl(config.port ?? DEFAULT_PORT, projectId, session.id)}`,
+          ),
+        );
+      } catch (error) {
+        console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
 
   review
     .command("run")

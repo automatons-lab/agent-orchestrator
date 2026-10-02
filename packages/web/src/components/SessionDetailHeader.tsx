@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { CI_STATUS } from "@aoagents/ao-core/types";
 import { cn } from "@/lib/cn";
-import { type DashboardSession, type DashboardPR, isPRMergeReady } from "@/lib/types";
+import {
+  type DashboardSession,
+  type DashboardPR,
+  isPRMergeReady,
+  isReviewOnlySession,
+} from "@/lib/types";
 import type { ProjectInfo } from "@/lib/project-name";
 import { DashboardNotificationButton } from "./DashboardNotificationButton";
 import { SessionDetailPRCard } from "./SessionDetailPRCard";
@@ -55,6 +60,7 @@ export function SessionDetailHeader({
   onRestore,
   onKill,
 }: SessionDetailHeaderProps) {
+  const reviewOnly = isReviewOnlySession(session);
   const prs = session.prs ?? [];
   const safeSelectedPRIndex = Math.min(selectedPRIndex, Math.max(0, prs.length - 1));
   const pr = prs[safeSelectedPRIndex] ?? session.pr;
@@ -199,6 +205,11 @@ export function SessionDetailHeader({
             ) : null}
           </div>
           <StatusBadge session={session} variant="pill" />
+          {reviewOnly ? (
+            <span className="session-detail-mode-badge session-detail-mode-badge--neutral">
+              Review only
+            </span>
+          ) : null}
           <span className="dashboard-app-header__session-id topbar-mobile-only">{session.id}</span>
         </>
       )}
@@ -284,8 +295,11 @@ export function SessionDetailHeader({
                   pr={pr as DashboardPR}
                   metadata={session.metadata}
                   lifecyclePrReason={session.lifecycle?.prReason ?? undefined}
-                  onAskAgentToFix={(comment, onSuccess, onError) =>
-                    askAgentToFix(session.id, comment, onSuccess, onError)
+                  onAskAgentToFix={
+                    reviewOnly
+                      ? undefined
+                      : (comment, onSuccess, onError) =>
+                          askAgentToFix(session.id, comment, onSuccess, onError)
                   }
                 />
               </div>

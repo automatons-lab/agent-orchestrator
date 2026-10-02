@@ -136,6 +136,26 @@ describe("SessionCard diff coverage", () => {
     );
   });
 
+  it("labels review-only sessions and hides terminal links", () => {
+    render(<SessionCard session={makeSession({ metadata: { role: "review-only" } })} />);
+    expect(screen.getByText("Review only")).toBeInTheDocument();
+    expect(screen.queryByText("terminal")).not.toBeInTheDocument();
+  });
+
+  it("labels completed review-only sessions without offering worker restoration", () => {
+    render(
+      <SessionCard
+        session={makeSession({
+          status: "terminated",
+          activity: "exited",
+          metadata: { role: "review-only" },
+        })}
+      />,
+    );
+    expect(screen.getByText("Review only")).toBeInTheDocument();
+    expect(screen.queryByText("restore")).not.toBeInTheDocument();
+  });
+
   it("shows a hover-revealed terminal link on active worker cards", () => {
     render(<SessionCard session={makeSession({ id: "reviewable-1" })} />);
 

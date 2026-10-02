@@ -172,6 +172,7 @@ export interface DashboardLifecycle {
   runtimeState: CanonicalRuntimeState;
   runtimeReason: CanonicalRuntimeReason;
   session: DashboardLifecycleFacet<CanonicalSessionState, CanonicalSessionReason> & {
+    kind?: "worker" | "orchestrator" | "review-only";
     startedAt?: string | null;
     completedAt?: string | null;
     terminatedAt?: string | null;
@@ -440,7 +441,14 @@ export function isDashboardRuntimeEnded(session: DashboardSession): boolean {
   return TERMINAL_STATUSES.has(session.status) || hasTerminalActivity(session);
 }
 
+export function isReviewOnlySession(session: DashboardSession): boolean {
+  return (
+    session.lifecycle?.session?.kind === "review-only" || session.metadata["role"] === "review-only"
+  );
+}
+
 export function isDashboardSessionRestorable(session: DashboardSession): boolean {
+  if (isReviewOnlySession(session)) return false;
   if (session.lifecycle) {
     const terminalByCoreTruth =
       session.lifecycle.sessionState === "done" ||

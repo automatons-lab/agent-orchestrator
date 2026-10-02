@@ -7,6 +7,7 @@ import {
   isPRUnenriched,
   getSessionTruthLabel,
   isDashboardSessionRestorable,
+  isReviewOnlySession,
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { getSessionTitle } from "@/lib/format";
@@ -140,6 +141,9 @@ export function DoneSessionCard({ session, onRestore }: DoneSessionCardProps) {
         <span className="font-[var(--font-mono)] text-[10px] tracking-wide text-[var(--color-text-muted)]">
           {session.id}
         </span>
+        {isReviewOnlySession(session) ? (
+          <span className="text-[10px] text-[var(--color-text-tertiary)]">Review only</span>
+        ) : null}
         <div className="flex-1" />
         {isRestorable && (
           <button
