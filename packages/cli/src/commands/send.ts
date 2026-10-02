@@ -17,19 +17,27 @@ import { getPluginRegistry, getSessionManager } from "../lib/create-session-mana
  * Resolve session context: tmux target name and Agent plugin.
  * Loads config and looks up the session once, avoiding duplicate work.
  */
-async function resolveSessionContext(sessionName: string): Promise<{
-  tmuxTarget: string;
-  runtimeName?: string;
-  agent: Agent;
-  session: Session | null;
-  sessionManager: OpenCodeSessionManager | null;
-}> {
+async function resolveSessionContext(sessionName: string): Promise<
+  | {
+      tmuxTarget: string;
+      runtimeName?: string;
+      agent: Agent;
+      session: Session | null;
+      sessionManager: OpenCodeSessionManager | null;
+    }
+  | { error: string }
+> {
   try {
     const config = loadConfig();
     const registry = await getPluginRegistry(config);
     const sm = await getSessionManager(config);
     const session = await sm.get(sessionName);
     if (session) {
+      // Return the refusal before agent lookup: review-only sessions have no
+      // agent, and a thrown lookup error would trigger the raw tmux fallback.
+      if (session.lifecycle?.session.kind === "review-only") {
+        return { error: `Session ${sessionName} is review-only and has no worker` };
+      }
       const tmuxTarget = session.runtimeHandle?.id ?? sessionName;
       const project = config.projects[session.projectId];
       const agentName = session.metadata["agent"]!;
@@ -127,13 +135,18 @@ export function registerSend(program: Command): void {
         opts: { file?: string; wait?: boolean; timeout?: string },
       ) => {
         // Resolve session context once: tmux target, agent plugin, session data
+        const context = await resolveSessionContext(session);
+        if ("error" in context) {
+          console.error(chalk.red(context.error));
+          process.exit(1);
+        }
         const {
           tmuxTarget,
           runtimeName,
           agent,
           session: existingSession,
           sessionManager,
-        } = await resolveSessionContext(session);
+        } = context;
 
         const rawMessage = await readMessageInput(opts, messageParts);
         // Auto-prefix with the sender's session ID when ao send is invoked
