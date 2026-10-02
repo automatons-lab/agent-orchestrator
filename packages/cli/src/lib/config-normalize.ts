@@ -263,8 +263,9 @@ function applyIdentityProfiles(doc: Obj, defaults: Obj, projects: Record<string,
         delete source.block["agent"];
         changes.push(`${source.where}.agent: removed (agents.${best} provides it)`);
       }
-      let agentConfig = source.block["agentConfig"];
-      if (!isObj(agentConfig)) continue;
+      const originalAgentConfig = source.block["agentConfig"];
+      if (!isObj(originalAgentConfig)) continue;
+      let agentConfig = originalAgentConfig;
       for (const k of profileKeys(profile)) {
         if (agentConfig[k] !== undefined && deepEqual(agentConfig[k], profile[k])) {
           const { [k]: _removed, ...remainingConfig } = agentConfig;
