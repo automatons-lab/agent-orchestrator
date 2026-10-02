@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSessionManager } from "../../session-manager.js";
-import { readMetadataRaw, writeMetadata } from "../../metadata.js";
+import { listMetadata, readMetadataRaw, writeMetadata } from "../../metadata.js";
 import { setupTestContext, teardownTestContext, type TestContext } from "../test-utils.js";
 
 describe("review-only sessions", () => {
@@ -58,6 +58,34 @@ describe("review-only sessions", () => {
     expect(ctx.mockWorkspace.create).not.toHaveBeenCalled();
     expect(ctx.mockWorkspace.destroy).not.toHaveBeenCalled();
     expect(scm.checkoutPR).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://github.com/another-owner/my-app/pull/42",
+    "https://github.com/org/another-repo/pull/42",
+    "https://github.com/another-owner/another-repo/pull/42",
+  ])("rejects a foreign resolved URL before probing state: %s", async (url) => {
+    const { sm, scm, pr } = setup();
+    // gh can resolve a URL outside --repo, while the plugin still labels the
+    // PR's owner/repo using the configured project. The URL is authoritative.
+    scm.resolvePR.mockResolvedValue({ ...pr, url });
+    await expect(sm.review!("my-app", url)).rejects.toThrow(/does not belong to.*org\/my-app/);
+    expect(scm.getPRState).not.toHaveBeenCalled();
+    expect(listMetadata(ctx.sessionsDir)).toEqual([]);
+    expect(ctx.mockRuntime.create).not.toHaveBeenCalled();
+    expect(ctx.mockWorkspace.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://github.com/org/my-app/pull/42",
+    "https://github.example.com/ORG/MY-APP/pull/42",
+    "https://gitlab.com/Org/My-App/-/merge_requests/42",
+  ])("accepts a matching resolved repository regardless of case: %s", async (url) => {
+    const { sm, scm, pr } = setup();
+    scm.resolvePR.mockResolvedValue({ ...pr, url });
+    const session = await sm.review!("my-app", url);
+    expect(session.pr?.url).toBe(url);
+    expect(scm.getPRState).toHaveBeenCalledOnce();
   });
 
   it("allows only one concurrent registration of the same PR", async () => {

@@ -95,7 +95,7 @@ import {
   normalizeOrchestratorSessionStrategy,
 } from "./orchestrator-session-strategy.js";
 import { sessionFromMetadata } from "./utils/session-from-metadata.js";
-import { dedupePrUrls } from "./utils/pr.js";
+import { dedupePrUrls, parsePrFromUrl } from "./utils/pr.js";
 import { safeJsonParse, validateStatus } from "./utils/validation.js";
 import { isGitBranchNameSafe } from "./utils.js";
 import { resolveAgentSelection, resolveAgentSelectionForSession } from "./agent-selection.js";
@@ -1264,6 +1264,16 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     const scm = project.scm?.plugin ? registry.get<SCM>("scm", project.scm.plugin) : null;
     if (!scm?.resolvePR) throw new Error("SCM plugin cannot resolve existing PRs");
     const pr = await scm.resolvePR(prRef, project);
+    // A URL can override the repository passed to the SCM CLI. Validate the
+    // resolved URL rather than owner/repo fields derived from project config.
+    const resolvedPr = parsePrFromUrl(pr.url);
+    if (
+      !resolvedPr?.owner ||
+      !resolvedPr.repo ||
+      `${resolvedPr.owner}/${resolvedPr.repo}`.toLowerCase() !== project.repo?.toLowerCase()
+    ) {
+      throw new Error(`PR ${pr.url} does not belong to project repository ${project.repo ?? "(unset)"}`);
+    }
     const state = await scm.getPRState(pr);
     if (state !== PR_STATE.OPEN) throw new Error(`Cannot review PR #${pr.number}: it is ${state}`);
     const sessionsDir = getProjectSessionsDir(projectId);
