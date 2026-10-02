@@ -51,7 +51,6 @@ This repository uses [Gitleaks](https://github.com/gitleaks/gitleaks) to prevent
 
 ### Dependency Security
 
-- **Dependency Review** — GitHub Action scans PRs for vulnerable dependencies
 - **npm audit** — Runs in CI to detect known vulnerabilities in dependencies
 - **Automated Updates** — Dependabot (or similar) for security patches
 
@@ -219,7 +218,6 @@ Security updates are provided for the latest version only.
 This project uses:
 
 - [Gitleaks](https://github.com/gitleaks/gitleaks) — Secret scanning
-- [GitHub Dependency Review](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/about-dependency-review) — Dependency vulnerability scanning
 - [npm audit](https://docs.npmjs.com/cli/v8/commands/npm-audit) — Dependency vulnerability detection
 - [Husky](https://typicode.github.io/husky/) — Git hooks for pre-commit validation
 
