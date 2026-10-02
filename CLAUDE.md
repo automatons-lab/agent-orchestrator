@@ -553,7 +553,8 @@ spawning → active ↔ ready → idle → exited
 ```typescript
 async getActivityState(session, readyThresholdMs?): Promise<ActivityDetection | null> {
   // 1. PROCESS CHECK — always first
-  if (!running) return { state: "exited", timestamp };
+  if (running === PROCESS_PROBE_INDETERMINATE) return null;
+  if (running === false) return { state: "exited", timestamp };
 
   // 2. ACTIONABLE STATES — check for waiting_input/blocked
   //    Source: native JSONL (Claude Code, Codex) OR AO activity JSONL (others)
@@ -640,7 +641,7 @@ if (fallback) return fallback;
 - Support tmux runtime (TTY-based `ps` lookup with process name regex)
 - Support process runtime (PID signal-0 check with EPERM handling)
 - Match BOTH the node wrapper name AND the actual binary name (some agents install as `.agentname` with a dot prefix — the regex must handle this)
-- Return `false` (not `null`) on error
+- Return `false` for confirmed absence and `PROCESS_PROBE_INDETERMINATE` when a probe cannot establish liveness. Codex recognizes missing tmux server/session diagnostics only from a normally exited `list-panes` command with exit code 1; timeouts, permission errors, missing executables, other tmux errors, and failed/empty `ps` probes remain indeterminate. See [process-probe contract](docs/DEVELOPMENT.md#process-probes).
 
 ## Constraints
 

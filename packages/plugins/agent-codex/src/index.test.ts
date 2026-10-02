@@ -138,6 +138,27 @@ function makeTmuxHandle(id = "test-session"): RuntimeHandle {
   return { id, runtimeName: "tmux", data: {} };
 }
 
+// Exit status/stderr from tmux list-panes, including the production missing-server case.
+const missingTmuxServer = "no server running on /tmp/tmux-1001/default\n";
+const missingTmuxTargets = [
+  missingTmuxServer,
+  "error connecting to /tmp/tmux-1001/default (No such file or directory)\n",
+  "can't find window: test-session\n",
+  "can't find session: test-session\n",
+  "no current target\n",
+];
+
+function tmuxCommandError(stderr: string, overrides: Record<string, unknown> = {}): Error {
+  return Object.assign(new Error(`Command failed: tmux list-panes\n${stderr}`), {
+    code: 1,
+    killed: false,
+    signal: null,
+    stdout: "",
+    stderr,
+    ...overrides,
+  });
+}
+
 function makeProcessHandle(pid?: number | string): RuntimeHandle {
   return { id: "proc-1", runtimeName: "process", data: pid !== undefined ? { pid } : {} };
 }
@@ -546,12 +567,66 @@ describe("isProcessRunning", () => {
     expect(await agent.isProcessRunning(makeTmuxHandle())).toBe("indeterminate");
   });
 
+  it.each(missingTmuxTargets)("returns false for confirmed tmux absence: %s", async (stderr) => {
+    mockExecFileAsync.mockRejectedValue(tmuxCommandError(stderr));
+    expect(await agent.isProcessRunning(makeTmuxHandle())).toBe(false);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "permission denied",
+      tmuxCommandError("error connecting to /tmp/tmux-1001/default (Permission denied)\n"),
+    ],
+    ["missing executable", tmuxCommandError("", { code: "ENOENT" })],
+    ["unexecutable binary", tmuxCommandError("", { code: "EACCES" })],
+    [
+      "timeout",
+      tmuxCommandError(missingTmuxServer, { code: null, killed: true, signal: "SIGTERM" }),
+    ],
+    ["killed command", tmuxCommandError(missingTmuxServer, { killed: true })],
+    ["signalled command", tmuxCommandError(missingTmuxServer, { signal: "SIGTERM" })],
+    ["unexpected exit code", tmuxCommandError(missingTmuxServer, { code: 2 })],
+    ["missing exit code", tmuxCommandError(missingTmuxServer, { code: undefined })],
+    ["missing stderr", tmuxCommandError(missingTmuxServer, { stderr: undefined })],
+    ["empty stderr", tmuxCommandError("")],
+    ["server crash", tmuxCommandError("server exited unexpectedly\n")],
+    ["ambiguous target", tmuxCommandError("more than one session: test-session\n")],
+    ["different target", tmuxCommandError("can't find window: another-session\n")],
+    ["extra error output", tmuxCommandError(`${missingTmuxServer}access denied\n`)],
+  ])("keeps %s indeterminate", async (_name, error) => {
+    mockExecFileAsync.mockRejectedValue(error);
+    expect(await agent.isProcessRunning(makeTmuxHandle())).toBe("indeterminate");
+    expect(
+      await agent.getActivityState(makeSession({ runtimeHandle: makeTmuxHandle() })),
+    ).toBeNull();
+  });
+
   it("returns indeterminate when ps command fails", async () => {
     mockExecFileAsync.mockImplementation((cmd: string) => {
       if (cmd === "tmux") return Promise.resolve({ stdout: "/dev/ttys003\n", stderr: "" });
       if (cmd === "ps") return Promise.reject(new Error("ps timed out"));
       return Promise.reject(new Error("unexpected"));
     });
+    expect(await agent.isProcessRunning(makeTmuxHandle())).toBe("indeterminate");
+  });
+
+  it("does not classify ps errors as tmux absence", async () => {
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: "/dev/ttys003\n", stderr: "" })
+      .mockRejectedValueOnce(tmuxCommandError("no current target\n"));
+    expect(await agent.isProcessRunning(makeTmuxHandle())).toBe("indeterminate");
+  });
+
+  it("keeps a missing window within a session indeterminate", async () => {
+    mockExecFileAsync.mockRejectedValue(tmuxCommandError("can't find window: test-session:gone\n"));
+    expect(await agent.isProcessRunning(makeTmuxHandle("test-session:gone"))).toBe("indeterminate");
+  });
+
+  it("returns indeterminate for an empty ps result", async () => {
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: "/dev/ttys003\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
     expect(await agent.isProcessRunning(makeTmuxHandle())).toBe("indeterminate");
   });
 
@@ -715,6 +790,14 @@ describe("getActivityState", () => {
     const result = await agent.getActivityState(session);
     expect(result?.state).toBe("exited");
     expect(result?.timestamp).toBeInstanceOf(Date);
+  });
+
+  it.each(missingTmuxTargets)("returns exited for confirmed tmux absence: %s", async (stderr) => {
+    mockExecFileAsync.mockRejectedValue(tmuxCommandError(stderr));
+    expect(await agent.getActivityState(makeSession({ runtimeHandle: makeTmuxHandle() }))).toEqual({
+      state: "exited",
+      timestamp: expect.any(Date),
+    });
   });
 
   it("returns null when process probe is indeterminate", async () => {
