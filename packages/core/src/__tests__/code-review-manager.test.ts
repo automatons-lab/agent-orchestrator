@@ -509,6 +509,52 @@ describe("executeCodeReviewRun", () => {
 });
 
 describe("sendCodeReviewFindingsToAgent", () => {
+  it("rejects delivery to a review-only session before calling send", async () => {
+    const session = makeSession({ runtimeHandle: null, workspacePath: null });
+    session.lifecycle.session.kind = "review-only";
+    const run = store.createRun({
+      linkedSessionId: session.id,
+      reviewerSessionId: "app-rev-external",
+      status: "needs_triage",
+    });
+    store.createFinding({
+      runId: run.id,
+      linkedSessionId: session.id,
+      severity: "error",
+      title: "Fix",
+      body: "A finding",
+    });
+    const sent: string[] = [];
+    await expect(
+      sendCodeReviewFindingsToAgent(
+        {
+          config,
+          storeFactory: () => store,
+          sessionManager: makeSessionManager(session, {
+            send: async (_id, message) => {
+              sent.push(message);
+            },
+          }),
+        },
+        { projectId: "app", runId: run.id },
+      ),
+    ).rejects.toThrow(/review-only/);
+    expect(sent).toEqual([]);
+    expect(store.getRun(run.id)?.status).toBe("needs_triage");
+  });
+
+  it("rejects a manual review-only run without an explicit PR head", async () => {
+    const session = makeSession({ runtimeHandle: null, workspacePath: null });
+    session.lifecycle.session.kind = "review-only";
+    await expect(
+      triggerCodeReviewForSession(
+        { config, storeFactory: () => store, sessionManager: makeSessionManager(session) },
+        { sessionId: session.id },
+      ),
+    ).rejects.toThrow(/PR head/);
+    expect(store.listRuns()).toEqual([]);
+  });
+
   it("sends open review findings to the linked coding worker and marks them sent", async () => {
     const session = makeSession();
     const sentMessages: Array<{ sessionId: string; message: string }> = [];
@@ -696,6 +742,41 @@ describe("prepareGitReviewerWorkspace", () => {
 
       expect(preparedPath).toBe(workspacePath);
       expect(existsSync(workspacePath)).toBe(true);
+
+      // A review-only session has no worker checkout. Its reviewer must use the
+      // PR target even when the project checkout moves to a different commit.
+      const targetSha = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoPath,
+        encoding: "utf8",
+      }).trim();
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=AO Test",
+          "-c",
+          "user.email=ao@example.com",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "project checkout advanced",
+        ],
+        { cwd: repoPath },
+      );
+      const session = makeSession({ workspacePath: null, runtimeHandle: null });
+      session.lifecycle.session.kind = "review-only";
+      const externalPath = await prepareGitReviewerWorkspace({
+        projectId: "app",
+        project,
+        session,
+        run: { ...run, targetSha },
+      });
+      expect(
+        execFileSync("git", ["rev-parse", "HEAD"], { cwd: externalPath, encoding: "utf8" }).trim(),
+      ).toBe(targetSha);
+      expect(
+        execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoPath, encoding: "utf8" }).trim(),
+      ).not.toBe(targetSha);
     } finally {
       if (originalHome === undefined) {
         delete process.env["HOME"];

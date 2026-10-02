@@ -600,6 +600,7 @@ function markSupersededReviewRuns({
 }
 
 async function resolveGitHeadSha(session: Session): Promise<string | undefined> {
+  if (session.lifecycle.session.kind === "review-only") return undefined;
   const cwd = session.workspacePath;
   if (!cwd) return undefined;
 
@@ -681,6 +682,9 @@ export async function prepareGitReviewerWorkspace({
   session: Session;
   run: CodeReviewRun;
 }): Promise<string> {
+  if (session.lifecycle.session.kind === "review-only" && !run.targetSha) {
+    throw new CodeReviewInvalidSessionError("Review-only sessions require a PR head SHA");
+  }
   const workspaceRoot = join(getProjectCodeReviewsDir(projectId), "workspaces");
   const workspacePath = join(workspaceRoot, run.reviewerSessionId);
   mkdirSync(workspaceRoot, { recursive: true });
@@ -833,6 +837,11 @@ export async function triggerCodeReviewForSession(
   const prUrl = session.pr?.url ?? session.metadata["pr"];
   const prNumber = session.pr?.number ?? parsePrNumber(prUrl);
   const targetSha = await resolveTargetSha(session);
+  if (session.lifecycle.session.kind === "review-only" && !targetSha) {
+    throw new CodeReviewInvalidSessionError(
+      "Review-only sessions are reviewed automatically at the PR head by the native reviewer",
+    );
+  }
   const requestedBy = input.requestedBy ?? "system";
 
   return withReviewRunCreationLock(store, () => {
@@ -1018,6 +1027,12 @@ export async function sendCodeReviewFindingsToAgent(
   const session = await sessionManager.get(run.linkedSessionId);
   if (!session) {
     throw new SessionNotFoundError(run.linkedSessionId);
+  }
+
+  if (session.lifecycle.session.kind === "review-only") {
+    throw new CodeReviewInvalidSessionError(
+      "Cannot send findings to a review-only session: no worker exists",
+    );
   }
 
   const findings = store.listFindings({ runId: run.id, status: "open" });

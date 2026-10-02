@@ -159,7 +159,7 @@ export function buildTransitionMetadataPatch(
   patch["runtimeHandle"] = lifecycle.runtime.handle ? JSON.stringify(lifecycle.runtime.handle) : "";
   patch["tmuxName"] = lifecycle.runtime.tmuxName ?? "";
 
-  patch["role"] = lifecycle.session.kind === "orchestrator" ? "orchestrator" : "";
+  patch["role"] = lifecycle.session.kind === "worker" ? "" : lifecycle.session.kind;
 
   return patch;
 }
