@@ -45,7 +45,7 @@ packages/
 | Validation | Zod |
 | Testing | Vitest + @testing-library/react |
 | Linting | ESLint 10 (flat config) + Prettier 3.8 |
-| CI/CD | GitHub Actions (lint, typecheck, test, release) |
+| CI | GitHub Actions (lint, typecheck, tests, coverage, secret scanning, dependency audit) |
 | Versioning | Changesets |
 | Git hooks | Husky + gitleaks (secret scanning) |
 | Container | OCI via Containerfile (Podman/Docker) |
