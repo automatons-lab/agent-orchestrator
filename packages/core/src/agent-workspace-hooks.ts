@@ -9,8 +9,10 @@
  * The session manager injects these wrappers into every agent's PATH,
  * including Claude Code (which also has its own PostToolUse hooks for writes).
  */
-import { writeFile, mkdir, readFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { appendFile, writeFile, mkdir, readFile, rename } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { isWindows } from "./platform.js";
@@ -21,6 +23,7 @@ import { isWindows } from "./platform.js";
 
 const DEFAULT_PATH = "/usr/bin:/bin";
 const PREFERRED_GH_BIN_DIR = "/usr/local/bin";
+const execFileAsync = promisify(execFile);
 
 /** Preferred gh binary path for wrapper scripts */
 export const PREFERRED_GH_PATH = `${PREFERRED_GH_BIN_DIR}/gh`;
@@ -955,7 +958,7 @@ async function atomicWriteFile(filePath: string, content: string, mode: number):
  * and `postLaunchSetup`.
  *
  * 1. Creates ~/.ao/bin/ with gh/git wrappers and metadata helper script
- * 2. Appends an "Agent Orchestrator" section to the workspace AGENTS.md
+ * 2. Excludes .ao/ locally and writes session context to .ao/AGENTS.md
  */
 export async function setupPathWrapperWorkspace(workspacePath: string): Promise<void> {
   // 1. Write shared wrappers to ~/.ao/bin/ (skip if version marker matches)
@@ -1001,6 +1004,24 @@ export async function setupPathWrapperWorkspace(workspacePath: string): Promise<
   // 2. Write AO session context to .ao/AGENTS.md (gitignored) so agents
   //    can discover they're in a managed session. We don't modify the
   //    repo-tracked AGENTS.md to avoid polluting worktrees with dirty state.
+  // Git resolves the shared exclude file for linked worktrees as well as clones.
+  const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "info/exclude"], {
+    cwd: workspacePath,
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  const excludePath = resolve(workspacePath, stdout.trim());
+  let excludes = "";
+  try {
+    excludes = await readFile(excludePath, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (!excludes.split(/\r?\n/).includes(".ao/")) {
+    await mkdir(dirname(excludePath), { recursive: true });
+    const separator = excludes && !excludes.endsWith("\n") ? "\n" : "";
+    await appendFile(excludePath, `${separator}.ao/\n`, "utf-8");
+  }
   const aoAgentsMdPath = join(workspacePath, ".ao", "AGENTS.md");
   await mkdir(join(workspacePath, ".ao"), { recursive: true });
   // On Windows, ao-metadata-helper.sh is never created — use a platform-appropriate section

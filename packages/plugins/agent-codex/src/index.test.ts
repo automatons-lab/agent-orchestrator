@@ -52,6 +52,7 @@ vi.mock("node:child_process", () => {
 });
 
 vi.mock("node:fs/promises", () => ({
+  appendFile: vi.fn().mockResolvedValue(undefined),
   writeFile: mockWriteFile,
   mkdir: mockMkdir,
   readFile: mockReadFile,
@@ -2067,7 +2068,8 @@ describe("setupWorkspaceHooks", () => {
 describe.skipIf(process.platform === "win32")("shell wrapper content", () => {
   beforeEach(() => {
     // Force wrapper installation by making version marker miss
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockExecFileAsync.mockResolvedValue({ stdout: ".git/info/exclude\n", stderr: "" });
   });
 
   async function getWrapperContent(name: string): Promise<string> {

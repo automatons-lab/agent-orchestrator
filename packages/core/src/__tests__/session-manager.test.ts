@@ -1,4 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// These tests use fake workspace paths; real Git setup is covered in
+// agent-workspace-hooks-git.test.ts.
+vi.mock("../agent-workspace-hooks.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  setupPathWrapperWorkspace: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { createSessionManager } from "../session-manager.js";
 import { readMetadataRaw, updateMetadata, writeMetadata } from "../metadata.js";
 import { recordActivityEvent } from "../activity-events.js";

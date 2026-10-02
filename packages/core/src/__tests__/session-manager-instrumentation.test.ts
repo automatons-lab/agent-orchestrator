@@ -13,6 +13,14 @@
  *   - cleanup-stack rollbacks emit per failed step (not in aggregate)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// These tests use fake workspace paths; real Git setup is covered in
+// agent-workspace-hooks-git.test.ts.
+vi.mock("../agent-workspace-hooks.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  setupPathWrapperWorkspace: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createSessionManager } from "../session-manager.js";
