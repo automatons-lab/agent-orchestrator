@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Command } from "commander";
+import type * as Core from "@aoagents/ao-core";
 
 const {
   mockGetPortfolio,
@@ -21,7 +22,7 @@ const {
 
 // Fork: keep the real config loader so `ao project add|update|rm` validate against a temp file.
 vi.mock("@aoagents/ao-core", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@aoagents/ao-core")>()),
+  ...(await importOriginal<typeof Core>()),
   isPortfolioEnabled: () => true,
   getPortfolio: mockGetPortfolio,
   getPortfolioSessionCounts: mockGetPortfolioSessionCounts,

@@ -23,7 +23,7 @@ Spawn parallel AI coding agents, each in its own git worktree, on a single machi
 npm install -g @aoagents/ao
 ```
 
-> **Nightly builds** (latest `main`): `npm install -g @aoagents/ao@nightly` — back to stable with `@latest`.
+> **Upstream nightly builds:** `npm install -g @aoagents/ao@nightly` — back to stable with `@latest`. These packages are not built from this repository.
 
 **Prerequisites:** [Node.js 20.18.3+](https://nodejs.org), [Git 2.25+](https://git-scm.com), the [`gh` CLI](https://cli.github.com), and at least one coding-agent CLI (e.g. [Claude Code](https://www.anthropic.com/claude-code)).
 

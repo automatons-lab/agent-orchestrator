@@ -89,6 +89,18 @@ describe("secret names", () => {
 });
 
 describe("resolveIdentitySecrets", () => {
+  it.each(["metadata", "secret"])("preserves the underlying %s request failure", async (stage) => {
+    const cause = new Error("network connection failed");
+    const fetch = async (url: string) => {
+      if (stage === "metadata" || !url.includes("/computeMetadata/")) throw cause;
+      return jsonResponse(200, { access_token: "ya29.test" });
+    };
+
+    await expect(resolveIdentitySecrets(config(IDENTITIES), { fetch, env: {} })).rejects.toMatchObject({
+      cause: { cause },
+    });
+  });
+
   it("fills unset variables from Secret Manager with one metadata call", async () => {
     const calls: string[] = [];
     const env: NodeJS.ProcessEnv = {};

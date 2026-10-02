@@ -263,15 +263,18 @@ function applyIdentityProfiles(doc: Obj, defaults: Obj, projects: Record<string,
         delete source.block["agent"];
         changes.push(`${source.where}.agent: removed (agents.${best} provides it)`);
       }
-      const agentConfig = source.block["agentConfig"];
-      if (!isObj(agentConfig)) continue;
+      const originalAgentConfig = source.block["agentConfig"];
+      if (!isObj(originalAgentConfig)) continue;
+      let agentConfig = originalAgentConfig;
       for (const k of profileKeys(profile)) {
         if (agentConfig[k] !== undefined && deepEqual(agentConfig[k], profile[k])) {
-          delete agentConfig[k];
+          const { [k]: _removed, ...remainingConfig } = agentConfig;
+          agentConfig = remainingConfig;
           changes.push(`${source.where}.agentConfig.${k}: removed (agents.${best} provides it)`);
         }
       }
       if (Object.keys(agentConfig).length === 0) delete source.block["agentConfig"];
+      else source.block["agentConfig"] = agentConfig;
     }
   }
 }

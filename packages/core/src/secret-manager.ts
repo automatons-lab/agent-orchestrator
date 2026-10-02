@@ -81,6 +81,7 @@ export async function fetchGceAccessToken(deps: SecretResolverDeps = {}): Promis
     throw new Error(
       `GCE metadata server unreachable at ${url} (${errorMessage(err)}); ` +
         "tokenSecret only resolves on a GCE VM with a service account",
+      { cause: err },
     );
   }
   if (!response.ok) {
@@ -113,7 +114,7 @@ export async function accessGcpSecret(
       signal: AbortSignal.timeout(SECRET_TIMEOUT_MS),
     });
   } catch (err) {
-    throw new Error(`Secret Manager request for ${secret} failed (${errorMessage(err)})`);
+    throw new Error(`Secret Manager request for ${secret} failed (${errorMessage(err)})`, { cause: err });
   }
   if (!response.ok) {
     const detail = await describeApiError(response);
@@ -184,14 +185,14 @@ export async function resolveIdentitySecrets(
     accessToken = await fetchGceAccessToken(deps);
   } catch (err) {
     const ids = pending.map((p) => p.id).join(", ");
-    throw new Error(`Cannot resolve tokenSecret for ${ids}: ${errorMessage(err)}`);
+    throw new Error(`Cannot resolve tokenSecret for ${ids}: ${errorMessage(err)}`, { cause: err });
   }
   const fetched = await Promise.all(
     pending.map(async (p) => {
       try {
         return { ...p, value: await accessGcpSecret(p.tokenSecret, accessToken, deps) };
       } catch (err) {
-        throw new Error(`Identity "${p.id}": ${errorMessage(err)}`);
+        throw new Error(`Identity "${p.id}": ${errorMessage(err)}`, { cause: err });
       }
     }),
   );

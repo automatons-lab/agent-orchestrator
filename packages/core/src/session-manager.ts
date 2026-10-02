@@ -15,7 +15,6 @@ import { statSync, existsSync, writeFileSync, mkdirSync, utimesSync, unlinkSync 
 import { recordActivityEvent } from "./activity-events.js";
 import { execFile } from "node:child_process";
 import { basename, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { promisify } from "node:util";
 import {
   isIssueNotFoundError,
