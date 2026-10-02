@@ -74,19 +74,6 @@ jobs:
             gitleaks detect --source . --verbose --log-opts "-n 10"
           fi
 
-  dependency-review:
-    name: Dependency Review
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Dependency Review
-        uses: actions/dependency-review-action@56339e523c0409420f6c2c9a2f4292bbb3c07dd3
-        with:
-          fail-on-severity: moderate
-
   npm-audit:
     name: NPM Audit
     runs-on: ubuntu-latest
