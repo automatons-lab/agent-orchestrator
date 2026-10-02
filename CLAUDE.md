@@ -514,6 +514,8 @@ All agent plugins (claude-code, codex, aider, opencode, etc.) must implement the
 - **Agent-native hooks** (Claude Code): PostToolUse hooks in `.claude/settings.json`
 - **PATH wrappers** (Codex, Aider, OpenCode): `~/.ao/bin/gh` and `~/.ao/bin/git` intercept commands. Call `setupPathWrapperWorkspace(workspacePath)` — it installs wrappers to `~/.ao/bin/` and writes session context to `.ao/AGENTS.md` (gitignored, does not modify tracked files).
 
+Workspace setup adds `.ao/` to Git's local `info/exclude` when needed. The path is resolved through Git so clones and linked worktrees both stay clean without requiring a repository `.gitignore` rule.
+
 **Environment requirements:**
 - All agents must set `AO_SESSION_ID` and optionally `AO_ISSUE_ID`
 - All agents using PATH wrappers must prepend `~/.ao/bin` to PATH

@@ -17,10 +17,17 @@ const { mockWriteFile, mockMkdir, mockReadFile, mockRename, mockIsWindows } = vi
 }));
 
 vi.mock("node:fs/promises", () => ({
+  appendFile: vi.fn().mockResolvedValue(undefined),
   writeFile: mockWriteFile,
   mkdir: mockMkdir,
   readFile: mockReadFile,
   rename: mockRename,
+}));
+
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn((_file, _args, _options, callback) =>
+    callback(null, { stdout: ".git/info/exclude\n", stderr: "" }),
+  ),
 }));
 
 vi.mock("node:os", () => ({
@@ -76,7 +83,7 @@ describe("setupPathWrapperWorkspace (Unix)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsWindows.mockReturnValue(false);
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   });
 
   it("creates ao bin directory", async () => {
@@ -98,7 +105,7 @@ describe("setupPathWrapperWorkspace (Unix)", () => {
   it("skips wrapper rewrite when version matches", async () => {
     mockReadFile
       .mockResolvedValueOnce("0.8.0") // version marker matches
-      .mockRejectedValueOnce(new Error("ENOENT")); // AGENTS.md doesn't exist
+      .mockRejectedValueOnce(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
 
     await setupPathWrapperWorkspace("/workspace");
 
@@ -141,7 +148,7 @@ describe("setupPathWrapperWorkspace (Windows)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsWindows.mockReturnValue(true);
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   });
 
   it("generates .cmd shims instead of bash scripts", async () => {
