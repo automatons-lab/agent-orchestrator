@@ -2,12 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { PRInfo, Session } from "@aoagents/ao-core";
 
-const { mockTmux, mockExec, mockDetectActivity } = vi.hoisted(() => ({
-  mockTmux: vi.fn(),
-  mockExec: vi.fn(),
-  mockDetectActivity: vi.fn(),
-}));
+const { mockTmux, mockExec, mockDetectActivity, mockGetAgentByNameFromRegistry } = vi.hoisted(
+  () => ({
+    mockTmux: vi.fn(),
+    mockExec: vi.fn(),
+    mockDetectActivity: vi.fn(),
+    mockGetAgentByNameFromRegistry: vi.fn(),
+  }),
+);
 
 const { mockConfigRef, mockSessionManager } = vi.hoisted(() => ({
   mockConfigRef: { current: null as Record<string, unknown> | null },
@@ -36,11 +40,7 @@ vi.mock("../../src/lib/plugins.js", () => ({
     processName: "claude",
     detectActivity: mockDetectActivity,
   }),
-  getAgentByNameFromRegistry: () => ({
-    name: "claude-code",
-    processName: "claude",
-    detectActivity: mockDetectActivity,
-  }),
+  getAgentByNameFromRegistry: mockGetAgentByNameFromRegistry,
 }));
 
 vi.mock("../../src/lib/session-utils.js", () => ({
@@ -83,6 +83,10 @@ beforeEach(() => {
   mockTmux.mockReset();
   mockExec.mockReset();
   mockDetectActivity.mockReset();
+  mockGetAgentByNameFromRegistry.mockReset().mockImplementation((_registry, name) => {
+    if (!name) throw new Error(`Unknown agent plugin: ${name}`);
+    return { name, processName: "claude", detectActivity: mockDetectActivity };
+  });
   mockSessionManager.get.mockReset();
   mockSessionManager.send.mockReset();
   mockConfigRef.current = null;
@@ -407,6 +411,83 @@ describe("send command", () => {
         reactions: {},
       };
     }
+
+    it.each([
+      { tmuxExists: false, tmuxResult: null },
+      { tmuxExists: true, tmuxResult: "" },
+    ])(
+      "rejects review-only sends before tmux fallback (tmuxExists=$tmuxExists)",
+      async ({ tmuxResult }) => {
+        mockConfigRef.current = makeConfig();
+        const pr = {
+          number: 14,
+          url: "https://github.com/org/my-app/pull/14",
+          title: "External PR",
+          owner: "org",
+          repo: "my-app",
+          branch: "external-pr",
+          baseBranch: "main",
+          isDraft: false,
+        } satisfies PRInfo;
+        mockSessionManager.get.mockResolvedValue({
+          id: "app-1",
+          projectId: "my-app",
+          status: "review_pending",
+          activity: null,
+          activitySignal: { state: "unavailable", activity: null, source: "none" },
+          branch: "external-pr",
+          issueId: null,
+          pr,
+          prs: [pr],
+          workspacePath: null,
+          runtimeHandle: null,
+          agentInfo: null,
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          lifecycle: {
+            version: 2,
+            session: {
+              kind: "review-only",
+              state: "idle",
+              reason: "awaiting_external_review",
+              startedAt: "2026-10-02T22:16:43.336Z",
+              completedAt: null,
+              terminatedAt: null,
+              lastTransitionAt: "2026-10-02T22:16:43.336Z",
+            },
+            pr: {
+              state: "open",
+              reason: "review_pending",
+              number: 14,
+              url: pr.url,
+              lastObservedAt: null,
+            },
+            runtime: {
+              state: "unknown",
+              reason: "spawn_incomplete",
+              lastObservedAt: null,
+              handle: null,
+              tmuxName: null,
+            },
+          },
+          metadata: { role: "review-only" },
+        } satisfies Session);
+        mockTmux.mockResolvedValue(tmuxResult);
+        mockDetectActivity.mockReturnValue("active");
+
+        await expect(
+          program.parseAsync(["node", "test", "send", "app-1", "hello", "--no-wait"]),
+        ).rejects.toThrow("process.exit(1)");
+
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Session app-1 is review-only and has no worker"),
+        );
+        expect(mockGetAgentByNameFromRegistry).not.toHaveBeenCalled();
+        expect(mockSessionManager.send).not.toHaveBeenCalled();
+        expect(mockTmux).not.toHaveBeenCalled();
+        expect(mockExec).not.toHaveBeenCalled();
+      },
+    );
 
     it("routes AO sessions through SessionManager.send", async () => {
       mockConfigRef.current = makeConfig();

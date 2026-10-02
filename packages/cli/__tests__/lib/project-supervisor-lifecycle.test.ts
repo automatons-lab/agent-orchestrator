@@ -124,13 +124,16 @@ beforeEach(() => {
       blockers: [],
     }),
   };
+  // Keep old polling work bound to its fixture even if a later test starts.
+  const fixturePlugins = plugins;
+  const fixtureScm = scm;
   const registry: PluginRegistry = {
     register: vi.fn(),
     get: vi.fn().mockImplementation((slot: string) => {
-      if (slot === "runtime") return plugins.runtime;
-      if (slot === "agent") return plugins.agent;
-      if (slot === "workspace") return plugins.workspace;
-      if (slot === "scm") return scm;
+      if (slot === "runtime") return fixturePlugins.runtime;
+      if (slot === "agent") return fixturePlugins.agent;
+      if (slot === "workspace") return fixturePlugins.workspace;
+      if (slot === "scm") return fixtureScm;
       return null;
     }),
     list: vi.fn().mockReturnValue([]),
@@ -145,9 +148,12 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   stopAllLifecycleWorkers();
   lifecycleManager.stop();
+  // Stopping the interval does not finish an already-started poll. Drain its
+  // promises/timeouts before replacing HOME or deleting the metadata fixture.
+  await vi.runAllTimersAsync();
   vi.useRealTimers();
   closeDb();
   rmSync(env.tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -190,6 +196,8 @@ describe("project supervisor and canonical lifecycle reconciliation", () => {
     "finalizes a persisted Codex session through the real probe after tmux absence: %s",
     async (stderr) => {
       plugins.agent = createCodexAgent();
+      // Exercise real process probes without unrelated asynchronous JSONL discovery.
+      vi.spyOn(plugins.agent, "getSessionInfo").mockResolvedValue(null);
       plugins.runtime.name = "tmux";
       seedSession("open");
       vi.mocked(plugins.runtime.isAlive).mockResolvedValue(false);
@@ -233,6 +241,7 @@ describe("project supervisor and canonical lifecycle reconciliation", () => {
 
   it("preserves detecting metadata when the real Codex tmux probe is indeterminate", async () => {
     plugins.agent = createCodexAgent();
+    vi.spyOn(plugins.agent, "getSessionInfo").mockResolvedValue(null);
     plugins.runtime.name = "tmux";
     seedSession("open");
     const lifecycle = readCanonicalLifecycle(env.sessionsDir, "app-1");
