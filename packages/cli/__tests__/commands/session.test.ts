@@ -278,6 +278,21 @@ afterEach(() => {
 });
 
 describe("session ls", () => {
+  it("lists review-only kind without probing a worker runtime", async () => {
+    writeFileSync(
+      join(sessionsDir, "app-review-7"),
+      "role=review-only\nstatus=review_pending\npr=https://github.com/acme/app/pull/7\n",
+    );
+    await program.parseAsync(["node", "test", "session", "ls", "--json"]);
+    const payload = JSON.parse(String(consoleSpy.mock.calls[0][0]));
+    expect(payload.data[0]).toMatchObject({
+      id: "app-review-7",
+      role: "review-only",
+      workspacePath: null,
+    });
+    expect(mockTmux).not.toHaveBeenCalled();
+  });
+
   it("shows project name as header when sessions exist", async () => {
     writeFileSync(join(sessionsDir, "app-1"), "branch=main\nstatus=working\n");
 

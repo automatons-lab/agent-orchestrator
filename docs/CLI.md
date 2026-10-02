@@ -40,6 +40,42 @@ ao session restore <session>           # Revive a crashed agent
 > `data` by default; `meta.hiddenTerminatedCount` reports how many were dropped.
 > Pass `--include-terminated` to include them and reset the count to `0`.
 
+## Review an existing PR
+
+```bash
+ao review 123                          # Auto-detect project; track an existing PR
+ao review https://github.com/acme/app/pull/123 --project my-app
+ao review 123 -p my-app --json          # Output { "session": ... }
+ao review list my-app                  # List native/local review runs
+```
+
+Start AO first with `ao start` (use `--no-orchestrator` if you only need polling
+and the dashboard). The running instance must supervise the project. Enable its
+native reviewer in `agent-orchestrator.yaml`:
+
+```yaml
+projects:
+  my-app:
+    # Existing path, repo, SCM and other project settings...
+    reviewer:
+      enabled: true
+      githubUser: review-bot
+```
+
+`--project` takes precedence; otherwise the command uses `ao spawn` project
+detection (a single configured project, `AO_PROJECT_ID`, or the current directory).
+The command rejects a disabled or misconfigured native reviewer.
+
+AO registers a **review-only** session and checks the PR through lifecycle polling.
+It creates no coding worker or worker worktree. Native reviews use the configured
+reviewer and appear on the PR and review board. Review-only sessions appear in
+`ao session ls` as `[review-only]` (JSON `role: "review-only"`) and in the dashboard
+with PR details. Worker terminal, send, restore and claim-PR actions are unavailable.
+Kill or clean up the session using the existing session commands.
+
+The existing `ao review run <session>`, `execute`, `list`, `send`, and `cancel`
+subcommands continue to manage reviewer runs attached to coding workers.
+
 ## Maintenance commands
 
 ```bash

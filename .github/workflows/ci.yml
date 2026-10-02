@@ -71,6 +71,8 @@ jobs:
         working-directory: packages/plugins/runtime-process
         run: node -e "const p=require('node-pty');const t=p.spawn('cmd.exe',['/c','exit'],{cols:80,rows:24});t.onExit(({exitCode})=>process.exit(exitCode));setTimeout(()=>process.exit(2),5000)"
       - run: pnpm test
+      # The OpenClaw extension is outside the pnpm workspace.
+      - run: pnpm --filter @aoagents/ao-core exec tsx --test ../../openclaw-plugin/index.test.ts
 
   test-web:
     name: Test Web (${{ matrix.os }})

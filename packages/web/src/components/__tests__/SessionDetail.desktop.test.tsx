@@ -71,6 +71,44 @@ describe("SessionDetail desktop layout", () => {
     vi.useRealTimers();
   });
 
+  it("shows review-only PR details without a terminal or worker actions", () => {
+    render(
+      <SessionDetail
+        session={makeSession({
+          id: "app-review-7",
+          metadata: { role: "review-only" },
+          pr: makePR({
+            unresolvedThreads: 1,
+            unresolvedComments: [
+              {
+                url: "https://github.com/acme/app/pull/7#discussion_r1",
+                path: "src/app.ts",
+                author: "review-bot",
+                body: "Fix the guard",
+              },
+            ],
+          }),
+        })}
+      />,
+    );
+    expect(screen.getByRole("region", { name: "Review-only session" })).toBeInTheDocument();
+    expect(screen.queryByTestId("direct-terminal")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ask Agent to Fix" })).not.toBeInTheDocument();
+    expect(screen.getByRole("banner")).toHaveTextContent("Review only");
+  });
+
+  it("does not offer worker restoration for terminated review-only sessions", () => {
+    const session = makeSession({
+      status: "terminated",
+      activity: "exited",
+      metadata: { role: "review-only" },
+    });
+    render(<SessionDetail session={session} />);
+    expect(screen.getByRole("region", { name: "Review-only session" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Restore/ })).not.toBeInTheDocument();
+  });
+
   it("renders the desktop shell, PR blockers, and unresolved comments", () => {
     render(
       <SessionDetail

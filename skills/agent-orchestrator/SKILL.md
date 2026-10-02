@@ -1,6 +1,6 @@
 ---
 name: agent-orchestrator
-description: "Open-source, pluggable agentic coding orchestrator. Manages durable coding agents (Claude Code, Codex, OpenCode) through a simple interface — spawn agents, track progress, and let feedback loops like PR reviews and CI failures automatically route to the right agents. Use for fixing bugs, building features, working on GitHub issues, checking status, and managing agent sessions."
+description: "Open-source, pluggable agentic coding orchestrator. Manages durable coding agents (Claude Code, Codex, OpenCode) and review-only sessions for existing PRs through a simple interface. Use for fixing bugs, building features, working on GitHub issues, requesting native PR reviews, checking status, and managing agent sessions."
 metadata: {"openclaw": {"emoji": "🤖", "requires": {"bins": ["ao", "gh"], "anyBins": ["node", "npm"]}, "os": ["darwin", "linux", "win32"]}}
 ---
 
@@ -9,6 +9,8 @@ metadata: {"openclaw": {"emoji": "🤖", "requires": {"bins": ["ao", "gh"], "any
 > https://github.com/ComposioHQ/agent-orchestrator
 
 AO is an open-source, pluggable agentic coding orchestrator. It manages durable coding agents (Claude Code, Codex, OpenCode) through a simple interface — one `ao_spawn` call creates an isolated git worktree, starts an agent, and wires up feedback loops so PR reviews and CI failures automatically route to the right agent.
+
+For an existing PR that needs review, `ao_review` registers a review-only session. AO's native reviewer uses a transient runtime and workspace; the session has no coding worker.
 
 ## Why AO instead of manual coding
 
@@ -21,6 +23,7 @@ When you have AO installed, use it instead of running coding agents manually via
 | Manually `git push` + `gh pr create` | Automatic — agent creates PR |
 | CI fails → you notice → you fix | Automatic CI retry/fix routing |
 | PR review comments → you read → you fix | `ao_review_check` handles it |
+| Existing PR needs a native review | `ao_review` (no coding worker) |
 | Kill process, remove worktree, clean branch | `ao_kill` + `ao_session_cleanup` |
 | Spawn 5 agents → 5 manual bash commands | `ao_batch_spawn` (one call, parallel) |
 
@@ -66,19 +69,28 @@ Any of: "do them all", "start all", "spawn them all", "batch it", "all of those"
 
 ### Instructions to running agent
 Any of: "tell it to also...", "ask the agent to...", "add X to that", "while it's at it..."
-→ Call `ao_send` with the session ID and the instruction
+→ Call `ao_send` with the coding worker session ID and the instruction. Review-only sessions have no worker to receive messages.
 
 ### Stop / kill / cancel
 → Confirm which session, then call `ao_kill`
 
 ### Agent crashed / stuck
-→ Call `ao_session_restore` to try recovery, or `ao_kill` + re-`ao_spawn`
+→ Check the session kind first. For coding workers, call `ao_session_restore` to try recovery, or `ao_kill` + re-`ao_spawn`. For review-only sessions, inspect status and report the native reviewer failure; do not restore or spawn a worker.
 
 ### Clean up
 → Call `ao_session_cleanup` (dry-run first, then execute)
 
-### PR feedback / reviews
-→ Call `ao_review_check`
+### Review an existing PR
+Any of: "review PR #42", "request a review of this PR", "review https://github.com/owner/repo/pull/42"
+→ Call `ao_review` with `pr` (a positive number or GitHub PR URL) and `project` when multiple projects are configured. Example: `{ "pr": "42", "project": "my-app" }`.
+
+This calls `ao review <PR> --project <project> --json`. The slash equivalent is `/ao review <PR-number-or-URL> [--project <project-id>]`. An omitted project uses CLI auto-detection. AO must already be running and supervising the project, with `reviewer.enabled` and `reviewer.githubUser` configured.
+
+Review-only sessions have no coding worker, terminal or persistent workspace. Never use `ao_send`, `/ao retry`, `ao_session_restore` or `ao_session_claim_pr` on them. Never create a fake worker via `ao_spawn` plus `claimPr` to request review, and never fall back to spawning a worker when `ao_review` fails. Report the CLI error, including disabled reviewer or missing running AO prerequisites.
+
+### Address PR review feedback
+Any of: "handle the review comments", "address reviewer feedback", "fix the requested changes"
+→ Call `ao_review_check` to route feedback to existing coding workers. This does not register a review-only session or request a native review of an arbitrary PR.
 
 ### Verification
 → Call `ao_verify`
@@ -87,7 +99,7 @@ Any of: "tell it to also...", "ask the agent to...", "add X to that", "while it'
 → Call `ao_doctor`
 
 ### Claim PR / attach PR
-→ Call `ao_session_claim_pr`
+→ Call `ao_session_claim_pr` for a coding worker. Use `ao_review` when the intent is to review an existing PR without a coding worker.
 
 ## Rules
 
@@ -119,7 +131,7 @@ After spawning, check `ao_status` for progress. Always include full PR URLs from
 ### Rule 6: Never fabricate
 If a tool call fails, show the error. Never claim you did something you didn't.
 
-## All Available Tools
+## All Available Tools (28)
 
 | Tool | When to use |
 |------|-------------|
@@ -131,12 +143,26 @@ If a tool call fails, show the error. Never claim you did something you didn't.
 | `ao_batch_spawn` | Start agents on multiple issues at once |
 | `ao_send` | Send instruction to a running agent |
 | `ao_kill` | Stop a session (confirm first) |
-| `ao_session_restore` | Recover a crashed session |
+| `ao_session_restore` | Recover a crashed coding worker |
 | `ao_session_cleanup` | Remove stale sessions (merged PRs / closed issues) |
-| `ao_session_claim_pr` | Attach an existing PR to a session |
-| `ao_review_check` | Check PRs for review comments to address |
+| `ao_session_claim_pr` | Attach an existing PR to a coding worker |
+| `ao_review` | Register an existing PR for native review without a coding worker |
+| `ao_review_check` | Route review comments to existing coding workers |
 | `ao_verify` | Mark issues as verified/failed, or list unverified |
 | `ao_doctor` | Health checks and diagnostics |
+| `ao_project_add` | Add a project to the AO config |
+| `ao_project_update` | Update a project's config overrides |
+| `ao_project_remove` | Remove a project from the AO config |
+| `ao_agent_add` | Add an agent profile |
+| `ao_agent_update` | Update an agent profile |
+| `ao_agent_remove` | Remove an agent profile |
+| `ao_agent_list` | List configured agent profiles |
+| `ao_identity_add` | Add an identity profile |
+| `ao_identity_update` | Update an identity profile |
+| `ao_identity_remove` | Remove an identity profile |
+| `ao_identity_list` | List configured identity profiles |
+| `ao_config_show` | Show the effective AO config |
+| `ao_defaults_set` | Set or remove inherited defaults |
 
 ## Setup
 
@@ -162,7 +188,7 @@ pm2 restart openclaw-gateway  # or however you run the gateway
 
 ## Security & Privacy
 
-AO is an orchestrator — it does not read, write, or transmit code itself. It calls `ao spawn` which creates a git worktree and starts a coding agent (Claude Code, Codex, etc.). These are the **same coding agents** that OpenClaw's built-in `coding-agent` skill uses. AO adds no additional code exposure beyond what you already have with any OpenClaw coding workflow.
+AO coordinates coding and review agents. `ao spawn` creates a git worktree and starts a coding agent (Claude Code, Codex, etc.); `ao review` registers an existing PR for the native reviewer, which reads the PR using its own transient workspace and agent. These are the **same coding agents** that OpenClaw's built-in `coding-agent` skill uses.
 
 What to know:
 - **GitHub access**: AO uses `gh` (GitHub CLI) with whatever credentials you've authenticated via `gh auth login`. Use a fine-grained PAT scoped to only the repos AO needs.
@@ -180,4 +206,6 @@ What to know:
 | `spawn tmux ENOENT` (macOS / Linux) | `brew install tmux` (macOS) or `apt install tmux` (Linux) |
 | `spawn tmux ENOENT` (Windows) | Your config has `runtime: tmux` set explicitly. Switch to `runtime: process` (or remove the override — `process` is the Windows default; ConPTY is used natively, no tmux required) |
 | Bot only responds in DMs | Set `channels.discord.groupPolicy` to `"open"` |
-| Session stuck | Use `ao_session_restore`, or kill and re-spawn |
+| Coding worker stuck | Use `ao_session_restore`, or kill and re-spawn |
+| `ao_review` reports disabled native reviewer | Configure `reviewer.enabled: true` and `reviewer.githubUser` for that project; report the error without spawning a worker |
+| `ao_review` requires a running AO instance | Start AO supervising the selected project before registering the review-only session |

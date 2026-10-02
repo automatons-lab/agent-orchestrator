@@ -13,6 +13,8 @@
 
 import { statSync, existsSync, writeFileSync, mkdirSync, utimesSync, unlinkSync } from "node:fs";
 import { recordActivityEvent } from "./activity-events.js";
+import { withFileLockSync } from "./file-lock.js";
+import { AGENT_REPORT_METADATA_KEYS } from "./agent-report.js";
 import { execFile } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -93,7 +95,7 @@ import {
   normalizeOrchestratorSessionStrategy,
 } from "./orchestrator-session-strategy.js";
 import { sessionFromMetadata } from "./utils/session-from-metadata.js";
-import { dedupePrUrls } from "./utils/pr.js";
+import { dedupePrUrls, parsePrFromUrl } from "./utils/pr.js";
 import { safeJsonParse, validateStatus } from "./utils/validation.js";
 import { isGitBranchNameSafe } from "./utils.js";
 import { resolveAgentSelection, resolveAgentSelectionForSession } from "./agent-selection.js";
@@ -356,12 +358,16 @@ function metadataToSession(
   options: MetadataToSessionOptions,
 ): Session {
   const sessionKind =
-    meta["role"] === "orchestrator" ||
-    (options.sessionPrefix
-      ? new RegExp(`^${escapeRegex(options.sessionPrefix)}-orchestrator-\\d+$`).test(sessionId)
-      : false)
-      ? "orchestrator"
-      : "worker";
+    meta["role"] === "review-only"
+      ? "review-only"
+      : meta["role"] === "orchestrator" ||
+          (options.sessionPrefix
+            ? new RegExp(`^${escapeRegex(options.sessionPrefix)}-orchestrator-\\d+$`).test(
+                sessionId,
+              )
+            : false)
+        ? "orchestrator"
+        : "worker";
   return sessionFromMetadata(sessionId, meta, {
     projectId: options.projectId,
     workspacePathFallback: options.workspacePathFallback,
@@ -605,7 +611,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     record: ActiveSessionRecord,
     project: ProjectConfig,
   ): ActiveSessionRecord {
-    if (record.raw["agent"]) return record;
+    if (record.raw["agent"] || record.raw["role"] === "review-only") return record;
 
     const agent = resolveSelectionForSession(project, record.sessionName, record.raw).agentName;
     updateMetadataPreservingMtime(sessionsDir, record.sessionName, { agent }, record.modifiedAt);
@@ -688,13 +694,16 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
             sessionId: record.sessionName,
             status: validateStatus(record.raw["status"]),
             createdAt: record.raw["createdAt"] ? new Date(record.raw["createdAt"]) : undefined,
-            sessionKind: isOrchestratorSessionRecord(
-              record.sessionName,
-              record.raw,
-              project.sessionPrefix,
-            )
-              ? "orchestrator"
-              : "worker",
+            sessionKind:
+              record.raw["role"] === "review-only"
+                ? "review-only"
+                : isOrchestratorSessionRecord(
+                    record.sessionName,
+                    record.raw,
+                    project.sessionPrefix,
+                  )
+                  ? "orchestrator"
+                  : "worker",
           }),
         );
         const canonicalUpdates = lifecycleMetadataUpdates(record.raw, lifecycle);
@@ -907,6 +916,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   async function reserveNextSessionIdentity(
     project: ProjectConfig,
     sessionsDir: string,
+    metadataOnly = false,
   ): Promise<{
     num: number;
     sessionId: string;
@@ -917,7 +927,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       const num = getSessionNumber(sessionName, project.sessionPrefix);
       if (num !== undefined) usedNumbers.add(num);
     }
-    for (const num of await listRemoteSessionNumbers(project)) {
+    for (const num of metadataOnly ? [] : await listRemoteSessionNumbers(project)) {
       usedNumbers.add(num);
     }
 
@@ -1064,6 +1074,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     plugins: ReturnType<typeof resolvePlugins>,
     sessionListPromise?: Promise<OpenCodeSessionListEntry[]>,
   ): Promise<void> {
+    if (session.lifecycle.session.kind === "review-only") return;
     await ensureOpenCodeSessionMapping(
       session,
       sessionName,
@@ -1247,6 +1258,69 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   }
 
   // Define methods as local functions so `this` is not needed
+  async function review(projectId: string, prRef: string): Promise<Session> {
+    const project = config.projects[projectId];
+    if (!project) throw new Error(`Unknown project: ${projectId}`);
+    const scm = project.scm?.plugin ? registry.get<SCM>("scm", project.scm.plugin) : null;
+    if (!scm?.resolvePR) throw new Error("SCM plugin cannot resolve existing PRs");
+    const pr = await scm.resolvePR(prRef, project);
+    // A URL can override the repository passed to the SCM CLI. Validate the
+    // resolved URL rather than owner/repo fields derived from project config.
+    const resolvedPr = parsePrFromUrl(pr.url);
+    if (
+      !resolvedPr?.owner ||
+      !resolvedPr.repo ||
+      `${resolvedPr.owner}/${resolvedPr.repo}`.toLowerCase() !== project.repo?.toLowerCase()
+    ) {
+      throw new Error(`PR ${pr.url} does not belong to project repository ${project.repo ?? "(unset)"}`);
+    }
+    const state = await scm.getPRState(pr);
+    if (state !== PR_STATE.OPEN) throw new Error(`Cannot review PR #${pr.number}: it is ${state}`);
+    const sessionsDir = getProjectSessionsDir(projectId);
+    const { sessionId } = await reserveNextSessionIdentity(project, sessionsDir, true);
+    try {
+      return withFileLockSync(join(sessionsDir, ".register-review.lock"), () => {
+        for (const sessionName of listMetadata(sessionsDir)) {
+          const raw = readMetadataRaw(sessionsDir, sessionName);
+          if (!raw) continue;
+          const existing = metadataToSession(sessionName, raw, {
+            projectId,
+            sessionPrefix: project.sessionPrefix,
+          });
+          if (isTerminalSession(existing)) continue;
+          if (existing.prs.some((tracked) => tracked.url === pr.url)) {
+            throw new Error(`PR #${pr.number} is already tracked by ${sessionName}`);
+          }
+        }
+
+        writeMetadata(sessionsDir, sessionId, {
+          project: projectId,
+          role: "review-only",
+          status: "pr_open",
+          worktree: "",
+          branch: pr.branch,
+          pr: pr.url,
+          prBaseBranch: pr.baseBranch,
+          prAutoDetect: false,
+          createdAt: new Date().toISOString(),
+        });
+        updateMetadata(sessionsDir, sessionId, {
+          [AGENT_REPORT_METADATA_KEYS.PR_IS_DRAFT]: String(pr.isDraft),
+        });
+        invalidateCache();
+        const raw = readMetadataRaw(sessionsDir, sessionId);
+        if (!raw) throw new SessionNotFoundError(sessionId);
+        return metadataToSession(sessionId, raw, {
+          projectId,
+          sessionPrefix: project.sessionPrefix,
+        });
+      });
+    } catch (error) {
+      deleteMetadata(sessionsDir, sessionId);
+      throw error;
+    }
+  }
+
   async function spawn(spawnConfig: SessionSpawnConfig): Promise<Session> {
     recordActivityEvent({
       projectId: spawnConfig.projectId,
@@ -2342,6 +2416,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
           workspacePathFallback: project.path,
         },
       );
+      if (session.lifecycle.session.kind === "review-only") return session;
       const selection = resolveSelectionForSession(project, sessionName, raw);
       const effectiveAgentName = selection.agentName;
       const plugins = resolvePlugins(project, effectiveAgentName);
@@ -2554,7 +2629,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     });
 
     // Destroy runtime — prefer handle.runtimeName to find the correct plugin
-    if (raw["runtimeHandle"]) {
+    if (existingLifecycle.session.kind !== "review-only" && raw["runtimeHandle"]) {
       const handle = safeJsonParse<RuntimeHandle>(raw["runtimeHandle"]);
       if (handle) {
         const runtimePlugin = registry.get<Runtime>(
@@ -2585,7 +2660,11 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     const worktree = raw["worktree"];
-    if (worktree && shouldDestroyWorkspacePath(project, projectId, worktree)) {
+    if (
+      existingLifecycle.session.kind !== "review-only" &&
+      worktree &&
+      shouldDestroyWorkspacePath(project, projectId, worktree)
+    ) {
       const workspacePlugin = project
         ? resolvePlugins(project).workspace
         : registry.get<Workspace>("workspace", config.defaults.workspace);
@@ -2612,7 +2691,11 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     let didPurgeOpenCodeSession = false;
-    if (options?.purgeOpenCode === true && cleanupAgent === "opencode") {
+    if (
+      existingLifecycle.session.kind !== "review-only" &&
+      options?.purgeOpenCode === true &&
+      cleanupAgent === "opencode"
+    ) {
       const mappedOpenCodeSessionId =
         asValidOpenCodeSessionId(raw["opencodeSessionId"]) ??
         (await discoverOpenCodeSessionIdByTitle(
@@ -2877,6 +2960,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
   async function send(sessionId: SessionId, message: string): Promise<void> {
     const { raw, sessionsDir, project, projectId } = requireSessionRecord(sessionId);
+    if (parseCanonicalLifecycle(raw).session.kind === "review-only") {
+      throw new Error(`Session ${sessionId} is review-only and has no worker`);
+    }
 
     const selection = resolveSelectionForSession(project, sessionId, raw);
     const selectedAgent = selection.agentName;
@@ -3202,6 +3288,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     if (!reference) throw new Error("PR reference is required");
 
     const { raw, sessionsDir, project, projectId } = requireSessionRecord(sessionId);
+    if (parseCanonicalLifecycle(raw).session.kind === "review-only") {
+      throw new Error(`Session ${sessionId} is review-only; register another PR with ao review`);
+    }
     if (isOrchestratorSessionRecord(sessionId, raw, project.sessionPrefix)) {
       throw new Error(`Session ${sessionId} is an orchestrator session and cannot claim PRs`);
     }
@@ -3384,6 +3473,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     const project: ProjectConfig = activeRecord.project;
     const projectId: string = activeRecord.projectId;
 
+    if (parseCanonicalLifecycle(raw).session.kind === "review-only") {
+      throw new SessionNotRestorableError(sessionId, "review-only sessions have no worker to restore");
+    }
     const selection = resolveSelectionForSession(project, sessionId, raw);
     const selectedAgent = selection.agentName;
     if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
@@ -3737,6 +3829,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     cleanup,
     send,
     claimPR,
+    review,
     remap,
   };
 }

@@ -12,7 +12,7 @@ interface PRCommentThreadProps {
   sendingUrls: Set<string>;
   sentUrls: Set<string>;
   errorUrls: Set<string>;
-  onAskAgentToFix: (comment: UnresolvedComment) => void;
+  onAskAgentToFix?: (comment: UnresolvedComment) => void;
 }
 
 export function PRCommentThread({
@@ -78,23 +78,25 @@ export function PRCommentThread({
               <div className="session-detail-comment__body">
                 <div className="session-detail-comment__file">{comment.path}</div>
                 <p className="session-detail-comment__text">{description}</p>
-                <button
-                  onClick={() => onAskAgentToFix(comment)}
-                  disabled={isSending}
-                  className={cn(
-                    "session-detail-comment__fix-btn",
-                    isSent && "session-detail-comment__fix-btn--sent",
-                    isError && "session-detail-comment__fix-btn--error",
-                  )}
-                >
-                  {isSending
-                    ? "Sending…"
-                    : isSent
-                      ? "Sent ✓"
-                      : isError
-                        ? "Failed"
-                        : "Ask Agent to Fix"}
-                </button>
+                {onAskAgentToFix ? (
+                  <button
+                    onClick={() => onAskAgentToFix(comment)}
+                    disabled={isSending}
+                    className={cn(
+                      "session-detail-comment__fix-btn",
+                      isSent && "session-detail-comment__fix-btn--sent",
+                      isError && "session-detail-comment__fix-btn--error",
+                    )}
+                  >
+                    {isSending
+                      ? "Sending…"
+                      : isSent
+                        ? "Sent ✓"
+                        : isError
+                          ? "Failed"
+                          : "Ask Agent to Fix"}
+                  </button>
+                ) : null}
               </div>
             </details>
           );

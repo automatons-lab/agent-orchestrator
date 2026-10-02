@@ -24,7 +24,7 @@ import type { ObservabilityLevel } from "./observability.js";
 /** Unique session identifier, e.g. "my-app-1", "backend-12" */
 export type SessionId = string;
 
-export type SessionKind = "worker" | "orchestrator";
+export type SessionKind = "worker" | "orchestrator" | "review-only";
 
 export type CanonicalSessionState =
   | "not_started"
@@ -267,6 +267,7 @@ export function isRestorable(session: {
   activity: ActivityState | null;
   lifecycle?: CanonicalSessionLifecycle;
 }): boolean {
+  if (session.lifecycle?.session.kind === "review-only") return false;
   if (session.lifecycle) {
     return (
       isTerminalSession(session) &&
@@ -2043,6 +2044,8 @@ export interface SessionMetadata {
   issue?: string;
   issueTitle?: string; // Issue title for event enrichment
   pr?: string;
+  /** Resolved base of the primary external PR for review-only sessions. */
+  prBaseBranch?: string;
   prAutoDetect?: boolean;
   summary?: string;
   project?: string;
@@ -2113,6 +2116,8 @@ export interface KillOptions {
 
 /** Session manager — CRUD for sessions */
 export interface SessionManager {
+  /** Track an external PR without creating a worker runtime or workspace. */
+  review?(projectId: string, prRef: string): Promise<Session>;
   spawn(config: SessionSpawnConfig): Promise<Session>;
   spawnOrchestrator(config: OrchestratorSpawnConfig): Promise<Session>;
   ensureOrchestrator(config: OrchestratorSpawnConfig): Promise<Session>;

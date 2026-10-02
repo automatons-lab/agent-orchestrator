@@ -75,7 +75,7 @@ export function sessionFromMetadata(
       owner: parsed?.owner ?? "",
       repo: parsed?.repo ?? "",
       branch: meta["branch"] ?? "",
-      baseBranch: "",
+      baseBranch: url === prUrl ? meta["prBaseBranch"] ?? "" : "",
       isDraft,
     };
   };
@@ -108,8 +108,12 @@ export function sessionFromMetadata(
     issueId: meta["issue"] || null,
     pr: prs[0] ?? null,
     prs,
-    workspacePath: meta["worktree"] || options.workspacePathFallback || null,
-    runtimeHandle: lifecycle.runtime.handle ?? runtimeHandle,
+    workspacePath:
+      lifecycle.session.kind === "review-only"
+        ? null
+        : meta["worktree"] || options.workspacePathFallback || null,
+    runtimeHandle:
+      lifecycle.session.kind === "review-only" ? null : lifecycle.runtime.handle ?? runtimeHandle,
     agentInfo: meta["summary"] ? { summary: meta["summary"], agentSessionId: null } : null,
     createdAt: meta["createdAt"] ? new Date(meta["createdAt"]) : (options.createdAt ?? new Date()),
     lastActivityAt: options.lastActivityAt ?? new Date(),

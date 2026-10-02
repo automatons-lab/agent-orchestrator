@@ -213,6 +213,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `ao start --restore` restores `last-stop.json` without prompting; `ao start --no-restore` skips restore
 - **Ctrl+C performs full graceful shutdown** (same as ao stop): kills all sessions, writes last-stop state, unregisters from running.json. 10s hard timeout guarantees exit.
 
+### ao review <PR>
+- Registers a metadata-only session for an existing PR number or URL; requires a running AO instance supervising the project and an enabled native reviewer (`reviewer.enabled` and `reviewer.githubUser`).
+- Resolves the project via `--project`, or the same single-project / `AO_PROJECT_ID` / cwd detection as `ao spawn`.
+- Canonical `lifecycle.session.kind` and metadata `role` are `review-only`; there is no coding worker runtime or workspace. The native reviewer uses its own transient runtime/workspace.
+- Lifecycle polling tracks PR state and triggers native reviews. Worker sends, restore and claim-PR operations reject review-only sessions; cleanup handles them without worker resources.
+- `ao session ls` exposes the kind; dashboard cards and detail views label it and hide terminal/worker actions. Existing `ao review run/list/execute/send/cancel` commands remain available.
+
 ### ao stop
 - `ao stop` (no args): kills ALL sessions across ALL projects, sends SIGTERM to parent ao start process, stops dashboard, unregisters
 - `ao stop <project>`: kills only that project's sessions, does NOT kill parent process or dashboard (they serve all projects)

@@ -1078,6 +1078,35 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       };
     };
 
+    // Review-only sessions derive their state solely from the PR. Missing worker
+    // runtime/activity evidence is intentional and must never trigger recovery.
+    if (lifecycle.session.kind === "review-only") {
+      if (session.pr && scm) {
+        const cached = prEnrichmentCache.get(
+          `${session.pr.owner}/${session.pr.repo}#${session.pr.number}`,
+        );
+        const evidence = {
+          shouldEscalateIdleToStuck: false,
+          idleWasBlocked: false,
+          activityEvidence: "review_only",
+        };
+        const decision = cached
+          ? resolvePREnrichmentDecision(cached, evidence)
+          : resolvePRLiveDecision({
+              prState: await scm.getPRState(session.pr),
+              ciStatus: "none",
+              reviewDecision: "none",
+              mergeable: false,
+              ...evidence,
+            });
+        commitLifecycleDecisionInPlace(lifecycle, decision, nowIso);
+        session.lifecycle = lifecycle;
+        session.status = decision.status;
+        return { status: decision.status, evidence: "review_only", detectingAttempts: 0 };
+      }
+      return { status: session.status, evidence: "review_only", detectingAttempts: 0 };
+    }
+
     let runtimeProbe: ProbeResult = { state: "unknown", failed: false };
     if (session.runtimeHandle && canProbeRuntimeIdentity) {
       const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
@@ -1610,6 +1639,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     reactionKey: string,
     reactionConfig: ReactionConfig,
   ): Promise<ReactionResult> {
+    if (session.metadata["role"] === "review-only" && reactionConfig.action !== "notify") {
+      return { reactionType: reactionKey, success: true, action: "none", escalated: false };
+    }
     const { id: sessionId, projectId } = session;
     const trackerKey = `${sessionId}:${reactionKey}`;
     let tracker = reactionTrackers.get(trackerKey);
@@ -1882,6 +1914,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     newStatus: SessionStatus,
     transitionReaction?: TransitionReaction,
   ): Promise<void> {
+    if (session.lifecycle.session.kind === "review-only") return;
     const project = config.projects[session.projectId];
     if (!project || !session.pr) return;
 
@@ -2594,7 +2627,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // Skip when cleanly approved (no unresolved threads). unresolvedThreads is
     // populated by maybeDispatchReviewBacklog into session metadata.
-    if (cached.reviewDecision === "approved") {
+    if (session.lifecycle.session.kind !== "review-only" && cached.reviewDecision === "approved") {
       const reviewBlob = session.metadata["prReviewComments"];
       let unresolvedThreads = 0;
       if (reviewBlob) {
@@ -2643,6 +2676,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     newStatus: SessionStatus,
     transitionReaction?: TransitionReaction,
   ): Promise<void> {
+    if (session.lifecycle.session.kind === "review-only") return;
     const project = config.projects[session.projectId];
     if (!project || !session.pr) return;
 
@@ -2771,6 +2805,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     session: Session,
     newStatus: SessionStatus,
   ): Promise<void> {
+    if (session.lifecycle.session.kind === "review-only") return;
     const project = config.projects[session.projectId];
     if (!project || !session.pr) return;
 
@@ -2918,7 +2953,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
    * grace window elapses.
    */
   async function maybeAutoCleanupOnMerge(session: Session): Promise<void> {
-    if (session.status !== SESSION_STATUS.MERGED) return;
+    const closedReview =
+      session.lifecycle.session.kind === "review-only" && session.lifecycle.pr.state === "closed";
+    if (session.status !== SESSION_STATUS.MERGED && !closedReview) return;
 
     // config.lifecycle is typed optional to support hand-constructed
     // configs in tests. When loaded from YAML via Zod, the schema's
@@ -2978,7 +3015,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     try {
       const result = await sessionManager.kill(session.id, {
         purgeOpenCode: true,
-        reason: "pr_merged",
+        reason: closedReview ? "auto_cleanup" : "pr_merged",
       });
       observer.recordOperation({
         metric: "lifecycle_poll",
@@ -3387,6 +3424,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
    * Called at the end of each checkSession cycle.
    */
   async function auditAndReactToReports(session: Session): Promise<void> {
+    if (session.lifecycle.session.kind === "review-only") return;
     const auditResult = auditAgentReports(session);
     const now = new Date().toISOString();
 

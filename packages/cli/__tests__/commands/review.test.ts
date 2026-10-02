@@ -13,23 +13,26 @@ import {
 } from "@aoagents/ao-core";
 import type * as AoCore from "@aoagents/ao-core";
 
-const { mockConfigRef, mockSessionManager, mockRuntimeDestroy, reviewStoreRootRef } = vi.hoisted(() => ({
-  mockConfigRef: { current: null as OrchestratorConfig | null },
-  mockRuntimeDestroy: vi.fn(),
-  mockSessionManager: {
-    get: vi.fn(),
-    list: vi.fn(),
-    spawn: vi.fn(),
-    spawnOrchestrator: vi.fn(),
-    ensureOrchestrator: vi.fn(),
-    restore: vi.fn(),
-    kill: vi.fn(),
-    cleanup: vi.fn(),
-    send: vi.fn(),
-    claimPR: vi.fn(),
-  },
-  reviewStoreRootRef: { current: "" },
-}));
+const { mockRunning, mockConfigRef, mockSessionManager, mockRuntimeDestroy, reviewStoreRootRef } =
+  vi.hoisted(() => ({
+    mockRunning: vi.fn(),
+    mockConfigRef: { current: null as OrchestratorConfig | null },
+    mockRuntimeDestroy: vi.fn(),
+    mockSessionManager: {
+      review: vi.fn(),
+      get: vi.fn(),
+      list: vi.fn(),
+      spawn: vi.fn(),
+      spawnOrchestrator: vi.fn(),
+      ensureOrchestrator: vi.fn(),
+      restore: vi.fn(),
+      kill: vi.fn(),
+      cleanup: vi.fn(),
+      send: vi.fn(),
+      claimPR: vi.fn(),
+    },
+    reviewStoreRootRef: { current: "" },
+  }));
 
 vi.mock("@aoagents/ao-core", async (importOriginal) => {
   const actual = await importOriginal<typeof AoCore>();
@@ -85,6 +88,8 @@ vi.mock("../../src/lib/create-session-manager.js", () => ({
     get: () => ({ destroy: mockRuntimeDestroy }),
   }),
 }));
+
+vi.mock("../../src/lib/running-state.js", () => ({ getRunning: mockRunning }));
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   const lifecycle = createInitialCanonicalLifecycle("worker", new Date("2026-05-10T10:00:00.000Z"));
@@ -189,6 +194,12 @@ beforeEach(() => {
   createGitRepo(appPath);
   createGitRepo(join(tmpDir, "docs"));
 
+  mockRunning.mockResolvedValue({ pid: 123, projects: ["app", "docs"] });
+  mockSessionManager.review.mockReset();
+  mockSessionManager.review.mockResolvedValue(
+    makeSession({ id: "app-review-7", runtimeHandle: null, metadata: { role: "review-only" } }),
+  );
+  mockSessionManager.spawn.mockReset();
   mockSessionManager.get.mockReset();
   mockSessionManager.get.mockResolvedValue(makeSession({ workspacePath: appPath }));
   mockSessionManager.list.mockReset();
@@ -220,6 +231,48 @@ afterEach(() => {
 });
 
 describe("review command", () => {
+  it("registers an existing PR without spawning a worker", async () => {
+    mockConfigRef.current!.projects.app.reviewer = { enabled: true, githubUser: "review-bot" };
+    await program.parseAsync(["node", "test", "review", "7", "--project", "app", "--json"]);
+    expect(mockSessionManager.review).toHaveBeenCalledWith("app", "7");
+    expect(mockSessionManager.spawn).not.toHaveBeenCalled();
+    expect(JSON.parse(String(consoleLogSpy.mock.calls.at(-1)?.[0])).session.id).toBe(
+      "app-review-7",
+    );
+  });
+
+  it("rejects a disabled native reviewer before registering a session", async () => {
+    await expect(
+      program.parseAsync(["node", "test", "review", "7", "-p", "app"]),
+    ).rejects.toThrow();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reviewer.enabled"));
+    expect(mockSessionManager.review).not.toHaveBeenCalled();
+  });
+
+  it("requires a daemon supervising the project", async () => {
+    mockConfigRef.current!.projects.app.reviewer = { enabled: true, githubUser: "review-bot" };
+    mockRunning.mockResolvedValue(null);
+    await expect(
+      program.parseAsync(["node", "test", "review", "7", "-p", "app"]),
+    ).rejects.toThrow();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("ao start"));
+    expect(mockSessionManager.review).not.toHaveBeenCalled();
+  });
+
+  it("resolves the project from AO_PROJECT_ID", async () => {
+    vi.stubEnv("AO_PROJECT_ID", "app");
+    mockConfigRef.current!.projects.app.reviewer = { enabled: true, githubUser: "review-bot" };
+    try {
+      await program.parseAsync(["node", "test", "review", "https://github.com/acme/app/pull/7"]);
+      expect(mockSessionManager.review).toHaveBeenCalledWith(
+        "app",
+        "https://github.com/acme/app/pull/7",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("requests and lists review runs through the CLI", async () => {
     await program.parseAsync(["node", "test", "review", "run", "app-1", "--json"]);
 

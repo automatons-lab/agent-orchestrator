@@ -4743,3 +4743,73 @@ describe("multi-PR state machine aggregation", () => {
     }
   });
 });
+
+describe("review-only lifecycle", () => {
+  function reviewSession() {
+    const session = makeSession({
+      status: "pr_open",
+      activity: null,
+      pr: makeMatchingPR(),
+      runtimeHandle: null,
+      workspacePath: null,
+      metadata: { role: "review-only" },
+    });
+    session.lifecycle.session.kind = "review-only";
+    return session;
+  }
+
+  it.each(["failing", "passing"] as const)(
+    "does not probe or message a worker when CI is %s and changes are requested",
+    async (ciStatus) => {
+      const scm = createMockSCM({
+        enrichSessionsPRBatch: mockBatchEnrichment({
+          ciStatus,
+          reviewDecision: "changes_requested",
+          hasConflicts: true,
+        }),
+        getPendingComments: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "c1", body: "Fix this", author: "reviewer", path: "src/a.ts", line: 1 },
+          ]),
+      });
+      config.reactions = {
+        "ci-failed": { auto: true, action: "send-to-agent", message: "Fix CI" },
+        "changes-requested": { auto: true, action: "send-to-agent", message: "Fix review" },
+        "merge-conflicts": { auto: true, action: "send-to-agent", message: "Rebase" },
+      };
+      const lm = setupCheck("app-1", {
+        session: reviewSession(),
+        registry: createMockRegistry({ runtime: plugins.runtime, agent: plugins.agent, scm }),
+        metaOverrides: { role: "review-only" },
+      });
+      await lm.check("app-1");
+      await lm.check("app-1");
+      expect(mockSessionManager.send).not.toHaveBeenCalled();
+      expect(plugins.runtime.isAlive).not.toHaveBeenCalled();
+      expect(plugins.agent.getActivityState).not.toHaveBeenCalled();
+      expect(mockSessionManager.restore).not.toHaveBeenCalled();
+      expect(lm.getStates().get("app-1")).toBe(
+        ciStatus === "failing" ? "ci_failed" : "changes_requested",
+      );
+      expect(JSON.parse(readMetadataRaw(env.sessionsDir, "app-1")!.lifecycle).session.kind).toBe(
+        "review-only",
+      );
+    },
+  );
+
+  it.each(["merged", "closed"] as const)("cleans up a %s external PR", async (state) => {
+    const scm = createMockSCM({ enrichSessionsPRBatch: mockBatchEnrichment({ state }) });
+    const lm = setupCheck("app-1", {
+      session: reviewSession(),
+      registry: createMockRegistry({ runtime: plugins.runtime, agent: plugins.agent, scm }),
+      metaOverrides: { role: "review-only" },
+    });
+    await lm.check("app-1");
+    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-1", {
+      purgeOpenCode: true,
+      reason: state === "merged" ? "pr_merged" : "auto_cleanup",
+    });
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
+  });
+});

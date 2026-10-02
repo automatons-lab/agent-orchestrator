@@ -108,6 +108,18 @@ function createReviewCommentsMetadata(overrides?: Record<string, unknown>): stri
 }
 
 describe("sessionToDashboard", () => {
+  it("preserves review-only kind through the dashboard boundary", () => {
+    const lifecycle = createInitialCanonicalLifecycle(
+      "review-only",
+      new Date("2025-01-01T00:00:00Z"),
+    );
+    const session = sessionToDashboard(
+      createCoreSession({ lifecycle, metadata: { role: "review-only" }, workspacePath: null }),
+    );
+    expect(session.lifecycle?.session.kind).toBe("review-only");
+    expect(session.metadata.role).toBe("review-only");
+  });
+
   it("should convert a core Session to DashboardSession", () => {
     const coreSession = createCoreSession();
     const dashboard = sessionToDashboard(coreSession);

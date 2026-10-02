@@ -16,7 +16,7 @@ interface SessionDetailPRCardProps {
   pr: DashboardPR;
   metadata: Record<string, string>;
   lifecyclePrReason?: string;
-  onAskAgentToFix: (
+  onAskAgentToFix?: (
     comment: { url: string; path: string; body: string },
     onSuccess: () => void,
     onError: () => void,
@@ -115,11 +115,8 @@ export function SessionDetailPRCard({
     };
   }, []);
 
-  const handleAskAgentToFix = async (comment: {
-    url: string;
-    path: string;
-    body: string;
-  }) => {
+  const handleAskAgentToFix = async (comment: { url: string; path: string; body: string }) => {
+    if (!onAskAgentToFix) return;
     setSentComments((prev) => {
       const next = new Set(prev);
       next.delete(comment.url);
@@ -343,7 +340,7 @@ export function SessionDetailPRCard({
         sendingUrls={sendingComments}
         sentUrls={sentComments}
         errorUrls={errorComments}
-        onAskAgentToFix={handleAskAgentToFix}
+        onAskAgentToFix={onAskAgentToFix ? handleAskAgentToFix : undefined}
       />
     </div>
   );

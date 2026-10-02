@@ -117,6 +117,7 @@ function buildDashboardLifecycle(session: Session): NonNullable<DashboardSession
     runtimeState: lifecycle.runtime.state,
     runtimeReason: lifecycle.runtime.reason,
     session: {
+      kind: lifecycle.session.kind,
       state: lifecycle.session.state,
       reason: lifecycle.session.reason,
       label: buildLifecycleLabel(lifecycle.session.state, lifecycle.session.reason),

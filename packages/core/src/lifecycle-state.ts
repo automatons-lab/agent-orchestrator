@@ -46,7 +46,7 @@ const CanonicalSessionLifecycleSchema = z.object({
   version: z.literal(2),
   session: z
     .object({
-      kind: z.enum(["worker", "orchestrator"]),
+      kind: z.enum(["worker", "orchestrator", "review-only"]),
       state: z.enum([
         "not_started",
         "working",
@@ -275,6 +275,7 @@ function synthesizeCanonicalLifecycle(
   const status = options.status ?? validateStatus(meta["status"]);
   const sessionKind: SessionKind =
     options.sessionKind ??
+    (meta["role"] === "review-only" ? "review-only" : undefined) ??
     (meta["role"] === "orchestrator" || options.sessionId?.endsWith("-orchestrator")
       ? "orchestrator"
       : "worker");
@@ -346,9 +347,11 @@ function normalizePayloadLifecycle(
     version: 2,
     session: {
       kind: hasPayloadSessionKind
-        ? payloadSession?.kind === "orchestrator"
-          ? "orchestrator"
-          : "worker"
+        ? payloadSession?.kind === "review-only"
+          ? "review-only"
+          : payloadSession?.kind === "orchestrator"
+            ? "orchestrator"
+            : "worker"
         : synthesized.session.kind,
       state: hasPayloadSessionState
         ? (payloadSession?.state as CanonicalSessionState | undefined) ?? synthesized.session.state
@@ -501,7 +504,7 @@ export function buildLifecycleMetadataPatch(
     pr: lifecycle.pr.url ?? "",
     runtimeHandle: lifecycle.runtime.handle ? JSON.stringify(lifecycle.runtime.handle) : "",
     tmuxName: lifecycle.runtime.tmuxName ?? "",
-    role: lifecycle.session.kind === "orchestrator" ? "orchestrator" : "",
+    role: lifecycle.session.kind === "worker" ? "" : lifecycle.session.kind,
   };
 }
 

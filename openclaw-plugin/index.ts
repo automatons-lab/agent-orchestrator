@@ -1,5 +1,5 @@
 /**
- * OpenClaw Plugin: Agent Orchestrator v0.3.0
+ * OpenClaw Plugin: Agent Orchestrator v0.6.0
  *
  * Open-source, pluggable agentic coding orchestrator. Manages durable coding
  * agents (Claude Code, Codex, OpenCode) and wires up feedback loops so PR
@@ -8,9 +8,8 @@
  * Provides:
  * - Hook: injects live repo data into AI context for work-related messages
  * - Slash command: /ao (with subcommands)
- * - 14 agent tools: ao_sessions, ao_session_list, ao_status, ao_issues,
- *   ao_spawn, ao_batch_spawn, ao_send, ao_kill, ao_doctor, ao_review_check,
- *   ao_verify, ao_session_cleanup, ao_session_restore, ao_session_claim_pr
+ * - 28 agent tools: sessions/status, issues, worker management, review-only
+ *   sessions (ao_review), review feedback (ao_review_check), and config management
  * - Background services: health monitoring + issue board scanner + auto follow-up
  */
 
@@ -48,9 +47,9 @@ interface PluginApi {
     handler: (event: PluginEvent) => Promise<void>,
     opts?: { priority: number },
   ) => void;
-  registerCommand?: (cmd: CommandRegistration) => void;
-  registerTool?: (tool: Record<string, unknown>) => void;
-  registerService?: (svc: Record<string, unknown>) => void;
+  registerCommand: (cmd: CommandRegistration) => void;
+  registerTool: (tool: Record<string, unknown>) => void;
+  registerService: (svc: Record<string, unknown>) => void;
   runtime?: {
     sendMessageToDefaultSession?: (message: string) => void;
   };
@@ -126,6 +125,31 @@ async function tryRun(
 /** Strip leading dashes from LLM-supplied args to prevent CLI flag injection. */
 function sanitizeCliArg(arg: string): string {
   return arg.replace(/^-+/, "");
+}
+
+/** Validate rather than rewrite inputs: `review` also has executable subcommands. */
+function buildReviewArgs(pr: unknown, project: unknown, json: boolean): string[] {
+  if (typeof pr !== "string") {
+    throw new Error("Invalid PR: expected a positive PR number or GitHub pull request URL.");
+  }
+  const ref = pr.trim();
+  const number =
+    /^#?([1-9]\d*)$/.exec(ref)?.[1] ??
+    /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/([1-9]\d*)\/?$/.exec(ref)?.[1];
+  if (!number || !Number.isSafeInteger(Number(number))) {
+    throw new Error("Invalid PR: expected a positive PR number or GitHub pull request URL.");
+  }
+  const args = ["review", ref];
+  if (project !== undefined) {
+    if (typeof project !== "string" || !/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(project)) {
+      throw new Error(
+        "Invalid project ID: use letters, numbers, underscores, dots or hyphens; do not start with a dash.",
+      );
+    }
+    args.push("--project", project);
+  }
+  if (json) args.push("--json");
+  return args;
 }
 
 // ---------------------------------------------------------------------------
@@ -907,7 +931,7 @@ export default function (api: PluginApi) {
   api.registerCommand({
     name: "ao",
     description:
-      "Agent Orchestrator — /ao sessions | status | spawn | issues | batch-spawn | retry | kill | doctor",
+      "Agent Orchestrator — /ao sessions | status | spawn | review | issues | batch-spawn | retry | kill | doctor",
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx: CommandContext) => {
@@ -944,6 +968,23 @@ export default function (api: PluginApi) {
             };
           const result = await spawnWithRetry(config, ["spawn", issueArg]);
           if (!result.ok) return { text: `Failed to spawn:\n${result.error}` };
+          return { text: result.output };
+        }
+
+        case "review": {
+          const usage = "Usage: /ao review <PR-number-or-URL> [--project <project-id>]";
+          const tokens = parts.slice(1);
+          if (tokens.length !== 1 && !(tokens.length === 3 && tokens[1] === "--project")) {
+            return { text: usage };
+          }
+          let args: string[];
+          try {
+            args = buildReviewArgs(tokens[0], tokens[2], false);
+          } catch (error) {
+            return { text: `${error instanceof Error ? error.message : String(error)}\n${usage}` };
+          }
+          const result = await tryRunAo(config, args, 30_000);
+          if (!result.ok) return { text: `Failed to register review-only session:\n${result.error}` };
           return { text: result.output };
         }
 
@@ -1080,6 +1121,7 @@ export default function (api: PluginApi) {
               "  /ao status                — all sessions overview",
               "  /ao issues [owner/repo]   — list open issues",
               "  /ao spawn <issue>         — spawn agent on issue",
+              "  /ao review <PR> [--project <id>] — register a review-only session",
               "  /ao batch-spawn <i1> <i2> — spawn multiple agents",
               "  /ao retry <id>            — retry failed session",
               "  /ao kill <id>             — kill a session",
@@ -1344,10 +1386,53 @@ export default function (api: PluginApi) {
   });
 
   api.registerTool({
+    name: "ao_review",
+    description:
+      "Register an existing PR number or GitHub PR URL as a review-only session for AO's native reviewer. " +
+      "Requires a running AO instance supervising the project and an enabled native reviewer. " +
+      "Creates no coding worker. Do not use ao_send, ao_session_restore or ao_session_claim_pr on this session. " +
+      "Use ao_review_check to route existing review feedback to coding workers instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        pr: {
+          type: "string",
+          description: "Positive PR number (e.g. 42) or https://github.com/owner/repo/pull/42",
+        },
+        project: {
+          type: "string",
+          description: "Project ID; omit only when the CLI can auto-detect the project",
+        },
+      },
+      required: ["pr"],
+    },
+    async execute(_toolCallId: string, params: { pr: string; project?: string }) {
+      let args: string[];
+      try {
+        args = buildReviewArgs(params.pr, params.project, true);
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+          isError: true,
+        };
+      }
+      const result = await tryRunAo(config, args, 30_000);
+      if (!result.ok) {
+        return {
+          content: [{ type: "text", text: `Failed to register review-only session: ${result.error}` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: result.output }] };
+    },
+  });
+
+  api.registerTool({
     name: "ao_review_check",
     description:
       "Check PRs for review comments and trigger agents to address them. " +
-      "Use when the user asks to check reviews, handle PR feedback, or address reviewer comments. " +
+      "Use when the user asks to handle PR feedback or address reviewer comments on coding workers. " +
+      "To request a native review of an existing PR without a coding worker, use ao_review. " +
       "Optionally pass a project ID to filter.",
     parameters: {
       type: "object",

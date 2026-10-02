@@ -127,6 +127,12 @@ ao start ~/path/to/another-repo
 4. **Reactions handle feedback** — CI failures and review comments are automatically routed back to the agent
 5. **You review and merge** — you only get pulled in when human judgment is needed
 
+To review an existing PR, run `ao review 123 --project my-app` (or pass its URL).
+With `ao start` running and the project's native reviewer enabled, AO tracks the PR
+and schedules reviews without creating a coding worker or worktree. Review-only
+sessions appear in the dashboard and `ao session ls`; results appear on the PR
+and review board. See the [CLI reference](docs/CLI.md#review-an-existing-pr).
+
 The orchestrator agent uses the [AO CLI](docs/CLI.md) internally to manage sessions. You don't need to learn or use the CLI — the dashboard and orchestrator handle everything.
 
 ## Configuration
