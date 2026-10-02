@@ -36,6 +36,33 @@ import { trustCodexWorkspace } from "./workspace-trust.js";
 
 const execFileAsync = promisify(execFile);
 
+function isMissingTmuxTarget(error: unknown, target: string): boolean {
+  if (
+    !(error instanceof Error) ||
+    !("code" in error) ||
+    error.code !== 1 ||
+    ("killed" in error && error.killed) ||
+    ("signal" in error && error.signal) ||
+    !("stderr" in error) ||
+    typeof error.stderr !== "string"
+  ) {
+    return false;
+  }
+
+  // Only a completed tmux query can confirm absence. Match a whole diagnostic,
+  // not a fragment of an unrelated failure or an execFile error message.
+  const stderr = error.stderr.trim();
+  return (
+    /^no server running on [^\r\n]+$/.test(stderr) ||
+    /^error connecting to [^\r\n]+ \(No such file or directory\)$/.test(stderr) ||
+    stderr === `can't find session: ${target}` ||
+    // list-panes reports a missing session as a missing window. A window/pane
+    // selector inside an existing session cannot establish session death.
+    (!/[:.]/.test(target) && stderr === `can't find window: ${target}`) ||
+    stderr === "no current target"
+  );
+}
+
 // =============================================================================
 // Plugin Manifest
 // =============================================================================
@@ -835,12 +862,16 @@ function createCodexAgent(): Agent {
         if (handle.runtimeName === "tmux" && handle.id) {
           // ps -eo is Unix-only; guard against stale tmux handles on Windows
           if (isWindows()) return false;
-          const { stdout: ttyOut } = await execFileAsync(
+          const panes = await execFileAsync(
             "tmux",
             ["list-panes", "-t", handle.id, "-F", "#{pane_tty}"],
             { timeout: 30_000 },
-          );
-          const ttys = ttyOut
+          ).catch((error: unknown) => {
+            if (isMissingTmuxTarget(error, handle.id)) return null;
+            throw error;
+          });
+          if (panes === null) return false;
+          const ttys = panes.stdout
             .trim()
             .split("\n")
             .map((t) => t.trim())

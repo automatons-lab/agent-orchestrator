@@ -80,6 +80,26 @@ under reconciliation until it otherwise reaches `done` or `terminated`.
 Review-only sessions reconcile PR state without worker probes or recovery; open
 PRs keep polling and merged/closed PRs follow the existing cleanup policy.
 
+#### Process probes
+
+`Agent.isProcessRunning()` returns `true` for a live agent, `false` for confirmed
+absence, and `PROCESS_PROBE_INDETERMINATE` when it cannot establish liveness.
+Codex's `getActivityState()` returns `exited` for `false` and `null` for an
+indeterminate probe. Lifecycle preserves existing metadata on an indeterminate
+process probe, including `detecting/runtime_lost`; it must not infer death from
+arbitrary command errors.
+
+For Codex's tmux `list-panes` query, exit code 1 with a recognized missing-target
+diagnostic confirms absence: `no server running on <socket>`,
+`error connecting to <socket> (No such file or directory)`,
+`can't find session: <target>`, `can't find window: <session>`, or
+`no current target` (an empty server). The target must match the queried session;
+a missing window within a session does not prove the session is gone. Killed or
+signalled commands, timeouts, permission errors, missing executables, unrecognized
+or mixed stderr, and failed/empty `ps` results remain indeterminate. These rules
+apply only to the tmux query; Windows still uses the existing platform helpers
+and PID probe behavior.
+
 ### Key Services
 
 | File                                     | Purpose                                         |

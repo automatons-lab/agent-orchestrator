@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type * as ChildProcess from "node:child_process";
 import type * as Core from "@aoagents/ao-core";
 import {
   createLifecycleManager,
@@ -9,6 +10,7 @@ import {
   createInitialCanonicalLifecycle,
   readCanonicalLifecycle,
   readMetadataRaw,
+  updateMetadata,
   writeMetadata,
   getProjectSessionsDir,
   validateConfig,
@@ -23,6 +25,7 @@ import {
   type PRState,
   type SessionKind,
 } from "@aoagents/ao-core";
+import { create as createCodexAgent } from "@aoagents/ao-plugin-agent-codex";
 import { closeDb } from "../../../core/src/events-db.js";
 import { reconcileProjectSupervisor } from "../../src/lib/project-supervisor.js";
 import {
@@ -32,9 +35,17 @@ import {
 
 // Keep the actual supervisor, worker timer, session listing and lifecycle pipeline.
 // Use isolated config/plugins and stub writes to the daemon's running-state file.
+const { mockExecFileAsync } = vi.hoisted(() => ({ mockExecFileAsync: vi.fn() }));
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof ChildProcess>()),
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for("nodejs.util.promisify.custom")]: mockExecFileAsync,
+  }),
+}));
 vi.mock("@aoagents/ao-core", async (importOriginal) => ({
   ...(await importOriginal<typeof Core>()),
   loadConfig: () => env.config,
+  isWindows: () => false,
 }));
 vi.mock("../../src/lib/create-session-manager.js", () => ({
   getSessionManager: async () => sessionManager,
@@ -52,6 +63,7 @@ let lifecycleManager: LifecycleManager;
 let scm: SCM;
 
 beforeEach(() => {
+  mockExecFileAsync.mockReset();
   vi.useFakeTimers();
   const tmpDir = mkdtempSync(join(tmpdir(), "ao-supervisor-lifecycle-"));
   vi.stubEnv("HOME", tmpDir);
@@ -154,7 +166,7 @@ function seedSession(prState: PRState, kind: SessionKind = "worker"): void {
     url: "https://github.com/org/my-app/pull/4",
     lastObservedAt: "2026-09-26T18:15:42.000Z",
   };
-  const runtimeHandle = { id: "app-1", runtimeName: "mock", data: {} };
+  const runtimeHandle = { id: "app-1", runtimeName: plugins.runtime.name, data: {} };
   if (kind === "worker") {
     lifecycle.runtime.handle = runtimeHandle;
     lifecycle.runtime.state = "alive";
@@ -163,7 +175,7 @@ function seedSession(prState: PRState, kind: SessionKind = "worker"): void {
   writeMetadata(env.sessionsDir, "app-1", {
     project: "my-app",
     role: kind,
-    agent: "mock-agent",
+    agent: plugins.agent.name,
     status: prState === "merged" ? "merged" : "review_pending",
     pr: lifecycle.pr.url ?? undefined,
     lifecycle: JSON.stringify(lifecycle),
@@ -174,6 +186,86 @@ function seedSession(prState: PRState, kind: SessionKind = "worker"): void {
 }
 
 describe("project supervisor and canonical lifecycle reconciliation", () => {
+  it.each(["no server running on /tmp/tmux-1001/default\n", "can't find window: app-1\n"])(
+    "finalizes a persisted Codex session through the real probe after tmux absence: %s",
+    async (stderr) => {
+      plugins.agent = createCodexAgent();
+      plugins.runtime.name = "tmux";
+      seedSession("open");
+      vi.mocked(plugins.runtime.isAlive).mockResolvedValue(false);
+      mockExecFileAsync.mockRejectedValue(
+        Object.assign(new Error(`Command failed: tmux list-panes\n${stderr}`), {
+          code: 1,
+          killed: false,
+          signal: null,
+          stdout: "",
+          stderr,
+        }),
+      );
+
+      await sessionManager.list("my-app");
+      expect(readCanonicalLifecycle(env.sessionsDir, "app-1")?.session.state).toBe("detecting");
+      await reconcileProjectSupervisor();
+      expect(isLifecycleWorkerRunning("my-app")).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const settled = readCanonicalLifecycle(env.sessionsDir, "app-1");
+      expect(settled?.session).toMatchObject({
+        state: "terminated",
+        reason: "runtime_lost",
+        startedAt: "2026-09-26T17:00:00.000Z",
+        terminatedAt: expect.any(String),
+      });
+      expect(settled?.pr.state).toBe("open");
+      expect(readMetadataRaw(env.sessionsDir, "app-1")).toMatchObject({
+        createdAt: "2026-09-26T17:00:00.000Z",
+        pr: "https://github.com/org/my-app/pull/4",
+      });
+      expect(plugins.runtime.destroy).not.toHaveBeenCalled();
+      expect(plugins.workspace.destroy).not.toHaveBeenCalled();
+      expect(scm.closePR).not.toHaveBeenCalled();
+      expect(scm.mergePR).not.toHaveBeenCalled();
+
+      await reconcileProjectSupervisor();
+      expect(isLifecycleWorkerRunning("my-app")).toBe(false);
+    },
+  );
+
+  it("preserves detecting metadata when the real Codex tmux probe is indeterminate", async () => {
+    plugins.agent = createCodexAgent();
+    plugins.runtime.name = "tmux";
+    seedSession("open");
+    const lifecycle = readCanonicalLifecycle(env.sessionsDir, "app-1");
+    if (!lifecycle) throw new Error("Missing seeded lifecycle");
+    lifecycle.session.state = "detecting";
+    lifecycle.session.reason = "runtime_lost";
+    lifecycle.runtime.state = "missing";
+    lifecycle.runtime.reason = "tmux_missing";
+    updateMetadata(env.sessionsDir, "app-1", {
+      lifecycle: JSON.stringify(lifecycle),
+      lifecycleEvidence: "previous_evidence",
+      detectingAttempts: "2",
+    });
+    const before = readMetadataRaw(env.sessionsDir, "app-1");
+    vi.mocked(plugins.runtime.isAlive).mockResolvedValue(false);
+    mockExecFileAsync.mockRejectedValue(
+      Object.assign(new Error("tmux permission denied"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stderr: "error connecting to /tmp/tmux-1001/default (Permission denied)\n",
+      }),
+    );
+
+    await reconcileProjectSupervisor();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(readMetadataRaw(env.sessionsDir, "app-1")).toEqual(before);
+    expect(isLifecycleWorkerRunning("my-app")).toBe(true);
+    expect(plugins.runtime.destroy).not.toHaveBeenCalled();
+    expect(plugins.workspace.destroy).not.toHaveBeenCalled();
+  });
+
   it.each(["merged", "open"] as const)(
     "finalizes a persisted %s PR session after list enrichment and a cold supervisor start",
     async (prState) => {
