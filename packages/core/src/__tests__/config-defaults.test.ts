@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { validateConfig, mergeConfigValues } from "../config.js";
+import { validateConfig } from "../config.js";
 
 function project(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
