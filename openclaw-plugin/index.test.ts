@@ -1,11 +1,229 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import registerPlugin, {
   extractConfiguredReposFromYaml,
   fetchIssues,
   mergeStringLists,
   parseStringArraySetting,
 } from "./index.ts";
+
+type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
+type RegisteredTool = {
+  name: string;
+  parameters: { required?: string[] };
+  execute: (id: string, params: Record<string, unknown>) => Promise<ToolResult>;
+};
+
+async function reviewBoundary(t: test.TestContext, stderr?: string) {
+  const cwd = await mkdtemp(join(tmpdir(), "ao-openclaw-review-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const callsPath = join(cwd, "calls.jsonl");
+  // Node runs the file named by the CLI subcommand, exercising execFile on
+  // every platform without a shell, executable bit, or Node module mocks.
+  const cliScript = `
+const fs = require("node:fs");
+const args = [require("node:path").basename(process.argv[1]), ...process.argv.slice(2)];
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args, cwd: process.cwd() }) + "\\n");
+if (${JSON.stringify(stderr ?? "")}) {
+  console.error(${JSON.stringify(stderr ?? "")});
+  process.exit(1);
+}
+console.log(args.includes("--json") ? JSON.stringify({ sessionId: "app-review-1", kind: "review-only" }) : "Review-only session app-review-1 created.");
+`;
+  for (const command of ["review", "review-check"]) {
+    await writeFile(join(cwd, command), cliScript);
+  }
+  const tools = new Map<string, RegisteredTool>();
+  let command: { handler: (ctx: { args?: string }) => Promise<{ text: string }> } | undefined;
+  registerPlugin({
+    pluginConfig: {
+      aoPath: process.execPath,
+      aoCwd: cwd,
+      healthPollIntervalMs: 0,
+      boardScanIntervalMs: 0,
+    },
+    logger: { info() {}, warn() {} },
+    registerCommand(value) {
+      command = value;
+    },
+    registerTool(value) {
+      const tool = value as unknown as RegisteredTool;
+      assert.equal(tools.has(tool.name), false, `duplicate tool: ${tool.name}`);
+      tools.set(tool.name, tool);
+    },
+    registerService() {},
+  });
+  assert.ok(command, "the /ao slash command must be registered");
+  return {
+    cwd,
+    tools,
+    command,
+    review: () => {
+      const tool = tools.get("ao_review");
+      assert.ok(tool, "ao_review must be registered");
+      return tool;
+    },
+    calls: async () => {
+      try {
+        return (await readFile(callsPath, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { args: string[]; cwd: string });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+    },
+  };
+}
+
+test("plugin tool contracts match all registrations and retain existing tools", async (t) => {
+  const boundary = await reviewBoundary(t);
+  const manifest = JSON.parse(
+    await readFile(new URL("./openclaw.plugin.json", import.meta.url), "utf8"),
+  );
+  const existing = [
+    "ao_sessions",
+    "ao_issues",
+    "ao_spawn",
+    "ao_batch_spawn",
+    "ao_send",
+    "ao_kill",
+    "ao_doctor",
+    "ao_review_check",
+    "ao_verify",
+    "ao_session_cleanup",
+    "ao_session_restore",
+    "ao_session_claim_pr",
+    "ao_session_list",
+    "ao_status",
+    "ao_project_add",
+    "ao_project_update",
+    "ao_project_remove",
+    "ao_agent_add",
+    "ao_agent_update",
+    "ao_agent_remove",
+    "ao_agent_list",
+    "ao_identity_add",
+    "ao_identity_update",
+    "ao_identity_remove",
+    "ao_identity_list",
+    "ao_config_show",
+    "ao_defaults_set",
+  ];
+  assert.deepEqual([...boundary.tools.keys()].sort(), [...existing, "ao_review"].sort());
+  assert.deepEqual(manifest.contracts.tools.slice().sort(), [...boundary.tools.keys()].sort());
+  assert.deepEqual(boundary.review().parameters.required, ["pr"]);
+  assert.match((await boundary.command.handler({ args: "help" })).text, /\/ao review/);
+});
+
+test("ao_review registers an existing PR with JSON and supplied project without worker commands", async (t) => {
+  const boundary = await reviewBoundary(t);
+  const result = await boundary.review().execute("call", { pr: "42", project: "my-app" });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    sessionId: "app-review-1",
+    kind: "review-only",
+  });
+  assert.deepEqual(await boundary.calls(), [
+    { args: ["review", "42", "--project", "my-app", "--json"], cwd: boundary.cwd },
+  ]);
+});
+
+test("ao_review accepts a PR URL and lets the CLI resolve an omitted project", async (t) => {
+  const boundary = await reviewBoundary(t);
+  const pr = "https://github.com/acme/app/pull/42";
+  await boundary.review().execute("call", { pr });
+  assert.deepEqual(await boundary.calls(), [{ args: ["review", pr, "--json"], cwd: boundary.cwd }]);
+});
+
+test("ao_review_check keeps routing worker feedback through review-check", async (t) => {
+  const boundary = await reviewBoundary(t);
+  const tool = boundary.tools.get("ao_review_check");
+  assert.ok(tool);
+  await tool.execute("call", { project: "my-app", dryRun: true });
+  assert.deepEqual(await boundary.calls(), [
+    { args: ["review-check", "my-app", "--dry-run"], cwd: boundary.cwd },
+  ]);
+});
+
+test("/ao review forwards PR and project as separate arguments with text output", async (t) => {
+  const boundary = await reviewBoundary(t);
+  const result = await boundary.command.handler({
+    args: "review https://github.com/acme/app/pull/42 --project my-app",
+  });
+  assert.match(result.text, /Review-only session app-review-1 created/);
+  await boundary.command.handler({ args: "review 43" });
+  assert.deepEqual(await boundary.calls(), [
+    {
+      args: ["review", "https://github.com/acme/app/pull/42", "--project", "my-app"],
+      cwd: boundary.cwd,
+    },
+    { args: ["review", "43"], cwd: boundary.cwd },
+  ]);
+});
+
+test("review entry points reject malformed PRs, subcommands and flag injection before executing", async (t) => {
+  const boundary = await reviewBoundary(t);
+  for (const pr of [
+    undefined,
+    "",
+    "0",
+    "-42",
+    "--help",
+    "run",
+    "execute",
+    "42 --json",
+    "42; touch pwned",
+    "9007199254740992",
+    "https://github.com/acme/app/issues/42",
+    "https://example.com/acme/app/pull/42",
+    "https://github.com/acme/app/pull/0",
+    "https://github.com/acme/app/pull/42?flag=--help",
+    null,
+    42,
+  ]) {
+    const result = await boundary.review().execute("call", { pr });
+    assert.equal(result.isError, true, `invalid PR accepted: ${String(pr)}`);
+    assert.match(result.content[0].text, /PR/);
+  }
+  for (const project of ["", "--help", "a b", "app;touch", "app/42", null, 42]) {
+    const result = await boundary.review().execute("call", { pr: "42", project });
+    assert.equal(result.isError, true, `invalid project accepted: ${String(project)}`);
+    assert.match(result.content[0].text, /project/i);
+  }
+  for (const args of [
+    "review",
+    "review run",
+    "review --help",
+    "review 42 --project",
+    "review 42 --project --help",
+    "review 42 --project app --json",
+    "review 42 app",
+    "review 42 --agent codex",
+  ]) {
+    const result = await boundary.command.handler({ args });
+    assert.match(result.text, /Usage|Invalid/i, `invalid slash input accepted: ${args}`);
+  }
+  assert.deepEqual(await boundary.calls(), []);
+});
+
+test("review entry points retain useful CLI failures including reviewer-disabled errors", async (t) => {
+  const boundary = await reviewBoundary(
+    t,
+    "Native reviewer is disabled for project my-app. Enable reviewer.enabled first.",
+  );
+  const toolResult = await boundary.review().execute("call", { pr: "42", project: "my-app" });
+  assert.equal(toolResult.isError, true);
+  assert.match(toolResult.content[0].text, /Native reviewer is disabled/);
+  assert.match(toolResult.content[0].text, /reviewer.enabled/);
+  const slashResult = await boundary.command.handler({ args: "review 42 --project my-app" });
+  assert.match(slashResult.text, /Native reviewer is disabled/);
+  assert.equal((await boundary.calls()).length, 2);
+});
 
 function makeIssue(number: number, title: string, repo: string) {
   return {

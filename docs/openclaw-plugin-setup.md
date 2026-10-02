@@ -1,6 +1,6 @@
 # OpenClaw Plugin Setup Guide
 
-How to set up the Agent Orchestrator (AO) plugin for OpenClaw so the AI bot delegates all coding work to AO agents.
+How to set up the Agent Orchestrator (AO) plugin for OpenClaw so the AI bot delegates coding work and existing-PR reviews to AO. Plugin v0.6.0 provides 28 tools, including `ao_review` for review-only sessions.
 
 ## Prerequisites
 
@@ -118,8 +118,12 @@ When asked about work → use `ao_issues` tool
 When asked about status → use `ao_sessions` or `ao_status` tool
 When asked to start work → use `ao_spawn` tool (always include project ID)
 When asked to start multiple → use `ao_batch_spawn` tool
+When asked to review an existing PR → use `ao_review` with PR number/URL and project ID
+When asked to address review comments on a coding worker → use `ao_review_check`
 When talking to an agent → use `ao_send` tool
 When stopping an agent → use `ao_kill` tool (confirm first)
+
+Review-only sessions have no coding worker. Do not send messages, restore them, or claim another PR on them. Do not spawn a fake coding worker to request a review.
 
 If an AO tool fails, report the error. Do NOT fall back to coding directly.
 ```
@@ -149,11 +153,45 @@ openclaw plugins list | grep agent-orchestrator
 
 # Verify tools are visible
 openclaw agent --agent main -m "List your tools"
-# Should show ao_sessions, ao_issues, ao_spawn, etc.
+# Should show 28 tools, including ao_review and ao_review_check
 
 # Verify AO works
 /ao doctor
 ```
+
+## 6. Review an Existing PR
+
+The project must have an enabled AO-native reviewer (`reviewer.enabled: true` and `reviewer.githubUser`) and a running AO instance supervising it. The CLI checks these prerequisites and reports failures through both OpenClaw entry points.
+
+```text
+# Slash command: human-readable CLI output
+/ao review 42 --project my-app
+/ao review https://github.com/acme/app/pull/42 --project my-app
+
+# AI tool: CLI JSON output
+ao_review({ "pr": "42", "project": "my-app" })
+```
+
+These invoke `ao review <PR> --project <project>`; the AI tool adds `--json`. Omit `project` only when CLI auto-detection can select it. PRs must be positive numbers or GitHub pull request URLs; project IDs must start with a letter, number or underscore and contain only letters, numbers, underscores, dots or hyphens. Extra slash arguments and malformed inputs are rejected before running the CLI.
+
+The resulting session is metadata-only and labeled `review-only`. AO tracks the existing PR and schedules its native reviewer, which creates its own transient runtime and workspace. There is no coding worker or worker terminal. Inspect progress with `ao_sessions`, `ao_status` or `ao_session_list`; do not use `ao_send`, `/ao retry`, `ao_session_restore` or `ao_session_claim_pr` on it. If registration fails, report the CLI error. Do not substitute `ao_spawn` plus `claimPr` to create a fake worker.
+
+`ao_review_check` retains its existing purpose: route review feedback to coding workers so they can address comments. It does not register an arbitrary PR for native review.
+
+## Tool Inventory (28)
+
+| Purpose | Tools |
+|---------|-------|
+| Sessions and status | `ao_sessions`, `ao_session_list`, `ao_status` |
+| Issues and coding workers | `ao_issues`, `ao_spawn`, `ao_batch_spawn`, `ao_send`, `ao_kill` |
+| Session maintenance | `ao_session_cleanup`, `ao_session_restore`, `ao_session_claim_pr` |
+| Reviews, verification and health | `ao_review`, `ao_review_check`, `ao_verify`, `ao_doctor` |
+| Projects | `ao_project_add`, `ao_project_update`, `ao_project_remove` |
+| Agent profiles | `ao_agent_add`, `ao_agent_update`, `ao_agent_remove`, `ao_agent_list` |
+| Identity profiles | `ao_identity_add`, `ao_identity_update`, `ao_identity_remove`, `ao_identity_list` |
+| Config and defaults | `ao_config_show`, `ao_defaults_set` |
+
+All previous tools and `/ao` subcommands remain available. `/ao help` includes the new review route.
 
 ## Why These Settings Matter
 
@@ -178,6 +216,8 @@ openclaw agent --agent main -m "List your tools"
 | Bot only responds in DMs | `groupPolicy` is `allowlist` | Set `channels.discord.groupPolicy` to `open` |
 | Bot responds to every message | `mentionPatterns` too broad | Remove patterns, rely on native @mentions |
 | Sessions show "exited" immediately | Agent (Claude Code) won't run as root | Run AO as non-root user |
+| `ao_review` reports disabled native reviewer | Reviewer is disabled or has no GitHub user | Configure the project's native reviewer before registration |
+| `ao_review` requires a running AO instance | AO is stopped or does not supervise this project | Start AO supervising the selected project |
 
 ## Architecture
 
@@ -194,3 +234,5 @@ Discord message → OpenClaw Gateway → AI Model (with AO tools)
 ```
 
 The bot (OpenClaw) is the **manager**. AO is the **workforce**. The bot never codes — it uses AO tools to spawn agents that do the actual work.
+
+Existing-PR reviews follow `OpenClaw → ao_review → ao review → review-only session → native reviewer`, with no coding worker spawned.
