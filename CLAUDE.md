@@ -113,6 +113,8 @@ spawning -> working -> pr_open -> ci_failed / review_pending
 
 **Stale runtime reconciliation:** `sm.list()` detects dead runtimes (tmux/process gone) during enrichment and persists `detecting` state with `runtime_lost` reason to disk. The lifecycle manager's `resolveProbeDecision` pipeline is the single authority on terminal decisions — `sm.list()` never writes `terminated` directly (#1735).
 
+**Polling eligibility:** The project supervisor and lifecycle polling loop use `shouldReconcileSession()` to keep canonical sessions under reconciliation until `done` or `terminated`, including after a restart. A merged PR, missing/exited runtime, or terminal legacy display status does not finalize canonical session state. The broader `isTerminalSession()` helper remains available for restore, claim and ownership decisions. See [the lifecycle contract](docs/DEVELOPMENT.md#session-lifecycle).
+
 ### Data Flow
 
 ```

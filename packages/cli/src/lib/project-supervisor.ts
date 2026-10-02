@@ -1,7 +1,7 @@
 import {
   loadConfig,
   getGlobalConfigPath,
-  isTerminalSession,
+  shouldReconcileSession,
   createCorrelationId,
   createProjectObserver,
   ConfigNotFoundError,
@@ -162,18 +162,18 @@ export async function reconcileProjectSupervisor(
     try {
       const sm = await getSessionManager(config);
       const sessions = await sm.list(projectId);
-      const nonTerminal = sessions.filter((s) => !isTerminalSession(s));
-      const hasNonTerminalSession = nonTerminal.length > 0;
+      const pendingSessions = sessions.filter(shouldReconcileSession);
+      const hasPendingSession = pendingSessions.length > 0;
       const isAttached = listLifecycleWorkers().includes(projectId);
 
       debug(
-        `${projectId}: sessions=${sessions.length} nonTerminal=${nonTerminal.length} attached=${isAttached}` +
-          (nonTerminal.length
-            ? ` ids=[${nonTerminal.map((s) => s.id).join(",")}]`
+        `${projectId}: sessions=${sessions.length} pending=${pendingSessions.length} attached=${isAttached}` +
+          (pendingSessions.length
+            ? ` ids=[${pendingSessions.map((s) => s.id).join(",")}]`
             : ""),
       );
 
-      if (hasNonTerminalSession) {
+      if (hasPendingSession) {
         if (!isAttached) {
           debug(`${projectId}: ensureLifecycleWorker (intervalMs=${options.intervalMs ?? "default"})`);
           const status = await ensureLifecycleWorker(config, projectId, options.intervalMs);
@@ -181,7 +181,7 @@ export async function reconcileProjectSupervisor(
         }
         await addProjectToRunning(projectId);
       } else if (isAttached) {
-        debug(`${projectId}: stopping lifecycle worker (no non-terminal sessions)`);
+        debug(`${projectId}: stopping lifecycle worker (no sessions awaiting reconciliation)`);
         stopLifecycleWorker(projectId);
         await removeProjectFromRunning(projectId);
       }

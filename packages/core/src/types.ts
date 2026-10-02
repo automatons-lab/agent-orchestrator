@@ -261,6 +261,25 @@ export function isTerminalSession(session: {
   );
 }
 
+/**
+ * Keep polling until canonical session truth is final. A merged PR or a lost
+ * runtime can look terminal to other consumers while lifecycle decisions
+ * (including probe disagreement and merge cleanup) still need reconciliation.
+ */
+export function shouldReconcileSession(session: {
+  status: SessionStatus;
+  activity: ActivityState | null;
+  lifecycle?: CanonicalSessionLifecycle;
+}): boolean {
+  if (session.lifecycle) {
+    return (
+      session.lifecycle.session.state !== "done" &&
+      session.lifecycle.session.state !== "terminated"
+    );
+  }
+  return !isTerminalSession(session);
+}
+
 /** Check if a session can be restored. */
 export function isRestorable(session: {
   status: SessionStatus;

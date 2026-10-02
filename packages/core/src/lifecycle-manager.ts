@@ -18,6 +18,7 @@ import {
   ACTIVITY_STATE,
   SESSION_STATUS,
   TERMINAL_STATUSES,
+  shouldReconcileSession,
   type ActivityState,
   type LifecycleManager,
   type OpenCodeSessionManager,
@@ -3528,11 +3529,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     try {
       const sessions = await sessionManager.list(scopedProjectId);
 
-      // Include sessions that are active OR whose status changed from what we last saw
-      // (e.g., list() detected a dead runtime and marked it "killed" — we need to
-      // process that transition even though the new status is terminal)
+      // Canonical state must settle even on a cold start: list() can expose
+      // legacy "killed" while the session is still detecting/runtime_lost.
+      // Also retain the existing handling of externally finalized transitions.
       const sessionsToCheck = sessions.filter((s) => {
-        if (!TERMINAL_STATUSES.has(s.status)) return true;
+        if (shouldReconcileSession(s)) return true;
         const tracked = states.get(s.id);
         return tracked !== undefined && tracked !== s.status;
       });
