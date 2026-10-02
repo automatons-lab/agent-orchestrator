@@ -3736,20 +3736,31 @@ describe("pollAll terminal status accounting", () => {
 
   it("treats all TERMINAL_STATUSES as inactive for all-complete", async () => {
     const notifier = createMockNotifier();
+    const scm = createMockSCM({ getPRState: vi.fn().mockResolvedValue("merged") });
     const registryWithNotifier: PluginRegistry = {
       ...mockRegistry,
       get: vi.fn().mockImplementation((slot: string, name: string) => {
         if (slot === "runtime") return plugins.runtime;
         if (slot === "agent") return plugins.agent;
+        if (slot === "scm") return scm;
         if (slot === "notifier" && name === "desktop") return notifier;
         return null;
       }),
     };
 
-    // All sessions in various terminal states — should count as inactive
+    // Merged sessions now reconcile even though their legacy status counts as
+    // complete. Supply actual PR evidence and metadata for that polling path.
+    const mergedSession = makeSession({ id: "s-2", status: "merged", pr: makeMatchingPR() });
+    writeMetadata(env.sessionsDir, mergedSession.id, {
+      project: "my-app",
+      worktree: env.tmpDir,
+      branch: "feat/test",
+      status: "merged",
+      pr: mergedSession.pr?.url,
+    });
     const terminalSessions = [
       makeSession({ id: "s-1", status: "killed" as SessionStatus }),
-      makeSession({ id: "s-2", status: "merged" as SessionStatus }),
+      mergedSession,
       makeSession({ id: "s-3", status: "done" as SessionStatus }),
       makeSession({ id: "s-4", status: "errored" as SessionStatus }),
       makeSession({ id: "s-5", status: "terminated" as SessionStatus }),
@@ -3774,8 +3785,13 @@ describe("pollAll terminal status accounting", () => {
     // Let the immediate pollAll() run
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(mergedSession.status).toBe("merged");
+    expect(mergedSession.lifecycle.session.state).toBe("idle");
     expect(notifier.notify).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "reaction.triggered" }),
+      expect.objectContaining({
+        type: "reaction.triggered",
+        data: expect.objectContaining({ reaction: expect.objectContaining({ key: "all-complete" }) }),
+      }),
     );
 
     lm.stop();
@@ -3831,39 +3847,45 @@ describe("pollAll terminal status accounting", () => {
     lm.stop();
   });
 
-  it("skips polling sessions in terminal statuses like done or errored", async () => {
-    const isolatedPlugins = createMockPlugins();
-    const isolatedRegistry = createMockRegistry({
-      runtime: isolatedPlugins.runtime,
-      agent: isolatedPlugins.agent,
-    });
+  it.each([false, true])(
+    "skips polling finalized sessions (stale legacy status: %s)",
+    async (staleStatus) => {
+      const isolatedPlugins = createMockPlugins();
+      const isolatedRegistry = createMockRegistry({
+        runtime: isolatedPlugins.runtime,
+        agent: isolatedPlugins.agent,
+      });
 
-    // Sessions in "done" / "errored" should not be polled
-    const sessions = [
-      makeSession({ id: "s-done", status: "done" as SessionStatus }),
-      makeSession({ id: "s-errored", status: "errored" as SessionStatus }),
-    ];
+      // Sessions in "done" / "errored" should not be polled
+      const sessions = [
+        makeSession({ id: "s-done", status: "done" as SessionStatus }),
+        makeSession({ id: "s-errored", status: "errored" as SessionStatus }),
+      ];
+      if (staleStatus) {
+        for (const session of sessions) session.status = "working";
+      }
 
-    vi.mocked(mockSessionManager.list).mockResolvedValue(sessions);
+      vi.mocked(mockSessionManager.list).mockResolvedValue(sessions);
 
-    // If these sessions were polled, determineStatus would call runtime.isAlive.
-    // Reset call count and verify it's not called.
-    vi.mocked(isolatedPlugins.runtime.isAlive).mockClear();
+      // If these sessions were polled, determineStatus would call runtime.isAlive.
+      // Reset call count and verify it's not called.
+      vi.mocked(isolatedPlugins.runtime.isAlive).mockClear();
 
-    const lm = createLifecycleManager({
-      config,
-      registry: isolatedRegistry,
-      sessionManager: mockSessionManager,
-    });
+      const lm = createLifecycleManager({
+        config,
+        registry: isolatedRegistry,
+        sessionManager: mockSessionManager,
+      });
 
-    lm.start(60_000);
-    await vi.advanceTimersByTimeAsync(0);
+      lm.start(60_000);
+      await vi.advanceTimersByTimeAsync(0);
 
-    // Terminal sessions should not be polled — runtime.isAlive should not be called
-    expect(isolatedPlugins.runtime.isAlive).not.toHaveBeenCalled();
+      // Terminal sessions should not be polled — runtime.isAlive should not be called
+      expect(isolatedPlugins.runtime.isAlive).not.toHaveBeenCalled();
 
-    lm.stop();
-  });
+      lm.stop();
+    },
+  );
 });
 
 describe("getStates", () => {

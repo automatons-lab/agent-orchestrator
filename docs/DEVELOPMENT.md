@@ -59,6 +59,27 @@ spawning → working → pr_open → ci_failed
 
 Activity states (orthogonal to lifecycle): `active`, `ready`, `idle`, `waiting_input`, `blocked`, `exited`.
 
+The flow above shows legacy display statuses. Canonical lifecycle stores session,
+PR and runtime state separately. Only canonical session `done` and `terminated`
+finish reconciliation. The project supervisor and lifecycle polling loop share
+`shouldReconcileSession()` so unfinished sessions remain eligible even when their
+PR is merged, their runtime is missing/exited, or listing exposes legacy `killed`.
+This also applies on a cold start, before the polling loop has tracked any sessions.
+Once all canonical sessions in a project settle, its lifecycle worker can detach.
+
+Listing detects runtime loss and persists `detecting/runtime_lost`; it does not
+choose a terminal reason. The lifecycle probe pipeline resolves runtime and agent
+evidence, retaining `detecting` for conflicting evidence and recording
+`terminated/runtime_lost` when both confirm death. Metadata and PR history remain
+available. The broader `isTerminalSession()` contract used by restore, claim and
+ownership checks is distinct from polling eligibility.
+
+Merged sessions with live workers still follow the configured cleanup policy,
+including the busy-agent grace period. Disabling merge cleanup leaves the session
+under reconciliation until it otherwise reaches `done` or `terminated`.
+Review-only sessions reconcile PR state without worker probes or recovery; open
+PRs keep polling and merged/closed PRs follow the existing cleanup policy.
+
 ### Key Services
 
 | File                                     | Purpose                                         |

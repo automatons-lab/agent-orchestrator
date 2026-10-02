@@ -61,6 +61,8 @@ Agents working on this repo should use these checked-in skills:
 - `packages/web/src/components/SessionDetail.tsx` — Session detail view
 - `packages/web/src/app/globals.css` — Design tokens
 
+Supervisor attachment and lifecycle polling use `shouldReconcileSession()` until canonical `done`/`terminated`; `isTerminalSession()` also treats merged PRs and lost runtimes as terminal and must not gate reconciliation. See [lifecycle contract](docs/DEVELOPMENT.md#session-lifecycle).
+
 ## CLI Behavior Notes
 
 - `ao stop` loads global config to see all projects; `ao stop <project>` only kills that project's sessions

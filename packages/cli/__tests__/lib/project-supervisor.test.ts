@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Core from "@aoagents/ao-core";
 
 const mockLoadConfig = vi.fn();
 const mockGetSessionManager = vi.fn();
@@ -8,7 +9,8 @@ const mockRemoveProjectFromRunning = vi.fn();
 const mockSetHealth = vi.fn();
 const activeWorkers = new Set<string>();
 
-vi.mock("@aoagents/ao-core", () => ({
+vi.mock("@aoagents/ao-core", async (importOriginal) => ({
+  ...(await importOriginal<typeof Core>()),
   ConfigNotFoundError: class ConfigNotFoundError extends Error {
     constructor(message = "No agent-orchestrator.yaml found.") {
       super(message);
@@ -19,30 +21,6 @@ vi.mock("@aoagents/ao-core", () => ({
   createProjectObserver: () => ({ setHealth: (...args: unknown[]) => mockSetHealth(...args) }),
   getGlobalConfigPath: () => "/tmp/global-config.yaml",
   loadConfig: (...args: unknown[]) => mockLoadConfig(...args),
-  isTerminalSession: (session: {
-    status: string;
-    activity: string | null;
-    lifecycle?: {
-      session: { state: string };
-      pr: { state: string };
-      runtime: { state: string };
-    };
-  }) => {
-    if (session.lifecycle) {
-      return (
-        session.lifecycle.session.state === "done" ||
-        session.lifecycle.session.state === "terminated" ||
-        session.lifecycle.pr.state === "merged" ||
-        session.lifecycle.runtime.state === "missing" ||
-        session.lifecycle.runtime.state === "exited"
-      );
-    }
-    return (
-      ["done", "killed", "terminated", "errored", "merged", "cleanup"].includes(
-        session.status,
-      ) || session.activity === "exited"
-    );
-  },
 }));
 
 vi.mock("../../src/lib/create-session-manager.js", () => ({
