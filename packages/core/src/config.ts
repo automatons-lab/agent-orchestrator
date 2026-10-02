@@ -13,7 +13,6 @@
 import { readFileSync, existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve, join, dirname, basename } from "node:path";
-import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import {
@@ -851,8 +850,7 @@ const IDENTITY_REF_KEYS = ["identity", "githubUser"] as const;
 function withoutInheritedIdentityRef(base: unknown, override: unknown): unknown {
   if (!isPlainObject(base) || !isPlainObject(override)) return base;
   if (!IDENTITY_REF_KEYS.some((k) => typeof override[k] === "string")) return base;
-  const out: Record<string, unknown> = { ...base };
-  for (const k of IDENTITY_REF_KEYS) delete out[k];
+  const { identity: _identity, githubUser: _githubUser, ...out } = base;
   return out;
 }
 

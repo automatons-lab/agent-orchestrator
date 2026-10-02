@@ -17,7 +17,6 @@ import { withFileLockSync } from "./file-lock.js";
 import { AGENT_REPORT_METADATA_KEYS } from "./agent-report.js";
 import { execFile } from "node:child_process";
 import { basename, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { promisify } from "node:util";
 import {
   isIssueNotFoundError,
