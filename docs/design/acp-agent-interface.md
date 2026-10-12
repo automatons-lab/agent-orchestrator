@@ -167,15 +167,34 @@ Messages are newline-delimited JSON, one request per line.
 
 | Request (AO → host)                                             | Response                                                                                                                                    |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{"op":"prompt","id":"<uuid>","text":"…","origin":"ci-failed"}` | `{"op":"ack","id":"…","state":"started"\|"queued","position":0}`                                                                            |
+| `{"op":"prompt","id":"<uuid>","text":"…","origin":"ci-failed"}` | `{"op":"ack","id":"…","state":"accepted"\|"sent"\|"done"\|"interrupted","duplicate":false,"position":0}`                                    |
+| `{"op":"delivery","id":"<uuid>"}`                               | `{"op":"delivery","id":"…","state":"unknown"\|"accepted"\|"sent"\|"done"\|"interrupted"}`                                                   |
 | `{"op":"status"}`                                               | `{"op":"status","state":"starting\|active\|waiting_input\|ready\|blocked\|exited","conversationId":"…","queue":0,"pendingPermission":null}` |
 | `{"op":"cancel"}`                                               | `{"op":"ok"}`, after `session/cancel`                                                                                                       |
 | `{"op":"permission","requestId":"…","optionId":"…"}`            | `{"op":"ok"}`                                                                                                                               |
 | `{"op":"shutdown"}`                                             | `{"op":"ok"}`, then the host exits                                                                                                          |
 
-- `id` is the deduplication key. The host remembers the last ids, so a resend after a socket error is not delivered twice.
 - Prompts are queued and sent one turn at a time. A prompt that arrives mid-turn waits for the turn to end; see [question 7](#open-questions).
 - The host can later add a `subscribe` op that streams events for a dashboard chat view ([option D](#d-chat-view-in-the-dashboard)).
+
+#### Delivery ledger and deduplication
+
+A prompt's `id` is one **logical delivery id**. AO creates it once per message and reuses it for every retry ([Message delivery](#message-delivery)). The host keeps a durable record of every id it has accepted, so even a replacement host never runs the same prompt twice.
+
+- **The ledger** is an append-only file, `<sid>.acp-deliveries.jsonl`, next to the session metadata and the socket. It lives as long as the session and is removed with it. Each id moves through these states, and each state is appended and flushed (`fsync`) before the step that depends on it:
+
+  | State         | Written when                                                                                                                                                        |
+  | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `accepted`    | Before the host replies `ack`. A prompt the host has acknowledged is therefore always on disk.                                                                      |
+  | `sent`        | Before the host calls `session/prompt` with it.                                                                                                                     |
+  | `done`        | When `session/prompt` resolves, with its `stopReason`.                                                                                                              |
+  | `interrupted` | When a host starts and finds `sent` without `done`: the previous host or agent died mid-turn. The agent may already have acted on the prompt, so it is not re-sent. |
+
+- **A `prompt` with an id already in the ledger** is answered with that id's current state and `"duplicate": true`. Nothing is delivered again.
+- **On start**, including a restore with `--load`, the host reads the ledger before it opens the socket:
+  - ids that are `accepted` but not `sent` are queued again, in their original order, and delivered once;
+  - ids that are `sent` but not `done` are marked `interrupted`, printed in the pane and left to [question 9](#open-questions).
+- **The guarantee:** an id is accepted at most once and sent to the agent at most once. A prompt the host acknowledged is never lost by a host restart before it is sent.
 
 ### Agent plugins
 
@@ -201,9 +220,16 @@ Messages are newline-delimited JSON, one request per line.
 - **A new optional agent method, `Agent.deliverMessage?(session, message)`.** When an agent implements it, `SessionManager.send` uses it instead of `Runtime.sendMessage`, readiness waiting and `sendWithConfirmation`.
   - This keeps `SessionManager` agent-agnostic.
   - The Codex app-server path can use the same hook.
-- **For ACP sessions**, delivery connects to the socket, sends `prompt` with a fresh id, and waits for `ack` with a 10 s timeout.
-  - No ack is an error, never a soft success.
-  - The existing retry runs on that error: a forced restore, then one resend.
+- **For ACP sessions**, `SessionManager.send` creates the delivery id once, before the first attempt. Every retry of that message reuses it ([Delivery ledger and deduplication](#delivery-ledger-and-deduplication)). Delivery connects to the socket, sends `prompt` and waits for `ack` with a 10 s timeout. There are three outcomes:
+
+  | Outcome                                                                                    | What AO does                                                                                                                                                                                                                                                                                                                                                                     |
+  | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | An `ack` arrives, including a duplicate ack                                                | Delivered.                                                                                                                                                                                                                                                                                                                                                                       |
+  | No connection: the socket is missing or refuses it, so the request was never written       | Not delivered. Restore the host if it is dead, then send again with **the same id**.                                                                                                                                                                                                                                                                                             |
+  | Ambiguous: the request was written, then the connection dropped or the ack timeout expired | **No blind resend.** Reconnect (restoring the host if it is dead, since a new host reads the same ledger) and ask `delivery` for the id. Any state other than `unknown` means delivered. `unknown` means the host never recorded the prompt, so AO sends it again with the same id. If the host cannot be reached, the send fails with "delivery unknown" and nothing is resent. |
+  - No ack is never a soft success.
+  - The existing "forced restore, then one resend" retry in `SessionManager.send` does not apply to ACP sessions; this procedure replaces it.
+
 - **Readiness** is the host reporting a state other than `starting`.
 - **`ao send` must not use the raw tmux fallback for ACP sessions.** It goes through `sessionManager.send`, or refuses, following the same pattern as the review-only guard in `packages/cli/src/commands/send.ts`.
 
@@ -240,8 +266,8 @@ The host appends entries with `source: "acp"`. `checkActivityLogState` already t
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Spawn                      | `runtime.create` with the host command, otherwise unchanged. The host reports `starting` until the first `session/prompt` is accepted.                                                                                                                      |
 | AO restarts                | tmux keeps the host and the agent running. AO reconnects to the socket at the path in the session metadata. A turn in flight continues and keeps writing to the pane and the activity log. The MVP keeps no chat history in AO, so nothing needs replaying. |
-| `ao stop`, then `ao start` | `ao stop` kills the tmux session; the host gets `SIGHUP`, sends `session/cancel` and exits. `ao start` restores the session, and the host comes back with `--load <id>`.                                                                                    |
-| The agent crashes          | The host prints the error in the pane and records `blocked`, and liveness reports exited. Restore follows the same path as above.                                                                                                                           |
+| `ao stop`, then `ao start` | `ao stop` kills the tmux session; the host gets `SIGHUP`, sends `session/cancel` and exits. `ao start` restores the session, the host comes back with `--load <id>`, and it replays the delivery ledger before accepting new prompts.                       |
+| The agent crashes          | The host prints the error in the pane and records `blocked`, and liveness reports exited. Restore follows the same path as above: queued prompts are delivered once, and a prompt that was mid-turn is marked `interrupted`.                                |
 | `ao session kill`          | As today: `runtime.destroy`.                                                                                                                                                                                                                                |
 
 ### What does not change
@@ -318,6 +344,7 @@ Proposed: the host gets a `--agent codex` mode that uses `CodexAppServerClient` 
 - **`session/load` can fail with -32603.** Back off and classify the error instead of starting a new conversation.
 - **Codex resume forks threads.** See [Codex](#codex).
 - **Double writers.** Never run `claude --resume <uuid>` while a host holds the same conversation. This matters for option B and for manual debugging.
+- **Ambiguous delivery.** A lost ack must never turn into a second delivery. One delivery id per message, the durable ledger, and a `delivery` lookup before any resend ensure this ([Delivery ledger and deduplication](#delivery-ledger-and-deduplication)). The cost is that a prompt interrupted mid-turn by a crash is not repeated automatically ([question 9](#open-questions)).
 - **Process-tree assumptions.** `isProcessRunning` and readiness look for the agent binary in the pane. ACP sessions need their own checks.
 - **Node floor.** The adapter needs Node ≥ 22, while AO supports ≥ 20.18.3.
 - **Socket exposure.** The socket lives in the user-owned data directory with mode `0600`; no TCP listener.
@@ -351,6 +378,7 @@ Each phase updates `docs/ARCHITECTURE.md`, `AGENTS.md` and `agent-orchestrator.y
 | 6   | Adapter distribution: an AO dependency or a user install?                                       | A pinned AO dependency, run with AO's Node, with `CLAUDE_CODE_EXECUTABLE` pointing at the user's `claude`.                                                              |
 | 7   | Messages that arrive mid-turn: queue or interrupt?                                              | Queue until the turn ends. Add an explicit `--interrupt` later if needed.                                                                                               |
 | 8   | Take-over in the MVP?                                                                           | No; phase 3.                                                                                                                                                            |
+| 9   | A prompt left `interrupted` by a host or agent crash mid-turn: resend it, or ask a human?       | Ask. The agent may already have acted on it. The pane and `ao session ls` show the interrupted prompt, and resending it is an explicit action.                          |
 
 ## References
 
